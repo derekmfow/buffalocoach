@@ -1,0 +1,13 @@
+node_modules/
+.env
+*.log
+.DS_Store
+
+# Local dev database + uploads (production uses /data on Render disk)
+data/
+sessions/
+
+# Editor
+.vscode/
+.idea/
+*.swp
