@@ -305,9 +305,10 @@ function CoachLogin({ onLogin }) {
 /* =========================================================
    HEADER
    ========================================================= */
-function DashboardHeader({ onLogout, currentSection, onNavigate }) {
+function DashboardHeader({ onLogout, currentSection, onNavigate, newLeadsCount = 0 }) {
   const navItems = [
     { id:'clients',      label:'CLIENTS' },
+    { id:'leads',        label:'LEADS'        },
     { id:'workouts',     label:'WORKOUTS' },
     { id:'meal-builder', label:'MEAL BUILDER' },
   ];
@@ -343,8 +344,13 @@ function DashboardHeader({ onLogout, currentSection, onNavigate }) {
         <nav className="flex gap-1">
           {navItems.map(item => (
             <button key={item.id} onClick={()=>onNavigate(item.id)}
-              className={`font-display font-bold tracking-[0.12em] text-xs px-4 py-1.5 rounded transition ${currentSection===item.id ? 'bg-white text-brand-black' : 'text-neutral-300 hover:text-white hover:bg-neutral-800'}`}>
+              className={`font-display font-bold tracking-[0.12em] text-xs px-4 py-1.5 rounded transition flex items-center gap-1.5 ${currentSection===item.id ? 'bg-white text-brand-black' : 'text-neutral-300 hover:text-white hover:bg-neutral-800'}`}>
               {item.label}
+              {item.id === 'leads' && newLeadsCount > 0 && (
+                <span className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${currentSection===item.id ? 'bg-brand-orange text-white' : 'bg-brand-orange text-white'}`}>
+                  {newLeadsCount}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -485,8 +491,14 @@ function ClientListView({ clients, mealLogs, onSelectClient, onAddClient }) {
 /* =========================================================
    ADD CLIENT MODAL
    ========================================================= */
-function AddClientModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name:'', email:'', pin:'', start_date:fmtDate(TODAY), goals:'' });
+function AddClientModal({ onClose, onSave, prefill }) {
+  const [form, setForm] = useState({
+    name: prefill?.name || '',
+    email: prefill?.email || '',
+    pin:'',
+    start_date: fmtDate(TODAY),
+    goals:'',
+  });
   const [errors, setErrors] = useState({});
   const submit = () => {
     const e = {};
@@ -500,8 +512,12 @@ function AddClientModal({ onClose, onSave }) {
   return (
     <Modal onClose={onClose}>
       <div className="p-6">
-        <h2 className="font-display font-bold text-3xl leading-tight">Add New Client</h2>
-        <p className="text-neutral-500 text-sm mb-6 mt-1">Creates a client record and login PIN. Email the PIN to them manually.</p>
+        <h2 className="font-display font-bold text-3xl leading-tight">{prefill ? 'Convert Lead to Client' : 'Add New Client'}</h2>
+        <p className="text-neutral-500 text-sm mb-6 mt-1">
+          {prefill
+            ? `Creating a client from the inquiry by ${prefill.name}. A welcome email with login details will be sent automatically — they'll be marked "converted" in your leads list.`
+            : "Creates the client record and sends a welcome email with the login URL and PIN. If the email can't send, you'll get a warning and can fall back to manual delivery."}
+        </p>
         <div className="space-y-4">
           <Field label="Full name" error={errors.name}>
             <input value={form.name} onChange={(e)=>setForm({...form, name:e.target.value})} placeholder="Jane Doe"
@@ -650,6 +666,70 @@ function UploadModal({ client, onClose, onSave }) {
 }
 
 /* =========================================================
+   RESEND LOGIN BUTTON — regenerates a PIN, emails new welcome.
+
+   Lives in the client detail header. Three phases:
+   idle → confirming → sending → result (shows new PIN + email status).
+
+   The resend endpoint regenerates the PIN (invalidating the old one) so
+   that this also serves as a "reset PIN" flow. Coach sees the new PIN
+   in the result so there's always a manual fallback if delivery failed.
+   ========================================================= */
+function ResendLoginButton({ clientId }) {
+  const [state, setState] = useState('idle'); // idle | confirming | sending | done
+  const [result, setResult] = useState(null);
+
+  const doResend = async () => {
+    setState('sending');
+    try {
+      const r = await api.post(`/api/clients/${clientId}/resend-welcome`);
+      setResult(r);
+      setState('done');
+    } catch (e) {
+      setResult({ email_sent: false, email_error: e.message, new_pin: null });
+      setState('done');
+    }
+  };
+
+  if (state === 'done' && result) {
+    return (
+      <span className={`text-xs font-display tracking-[0.1em] px-2 py-1 rounded ${
+        result.email_sent
+          ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
+          : 'bg-amber-50 text-amber-900 border border-amber-300'
+      }`}>
+        {result.email_sent
+          ? <>✓ EMAILED · NEW PIN <span className="font-mono font-bold tracking-widest ml-1">{result.new_pin}</span></>
+          : <>⚠ EMAIL FAILED · NEW PIN <span className="font-mono font-bold tracking-widest ml-1">{result.new_pin}</span> · text it manually</>
+        }
+        <button onClick={()=>{ setState('idle'); setResult(null); }}
+          className="ml-2 text-neutral-400 hover:text-neutral-700">×</button>
+      </span>
+    );
+  }
+
+  if (state === 'confirming') {
+    return (
+      <span className="inline-flex items-center gap-2 text-xs">
+        <span className="text-neutral-700">Generate new PIN and resend welcome?</span>
+        <button onClick={doResend}
+          className="font-display font-bold tracking-[0.1em] text-[11px] px-2 py-1 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition">YES</button>
+        <button onClick={()=>setState('idle')}
+          className="font-display font-bold tracking-[0.1em] text-[11px] px-2 py-1 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition">CANCEL</button>
+      </span>
+    );
+  }
+
+  return (
+    <button onClick={()=>setState('confirming')} disabled={state === 'sending'}
+      title="Regenerate the client's PIN and resend the welcome email"
+      className="font-display font-semibold tracking-[0.1em] text-[11px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition disabled:opacity-60">
+      {state === 'sending' ? 'SENDING…' : 'RESEND LOGIN'}
+    </button>
+  );
+}
+
+/* =========================================================
    CLIENT DETAIL
    ========================================================= */
 function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onSaveMealSuggestion, onDeleteMealSuggestion, onBack }) {
@@ -701,7 +781,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
               <span className="text-neutral-300">·</span>
               <span>Started {displayDate(client.start_date)}</span>
               <span className="text-neutral-300">·</span>
-              <span>PIN <span className="font-mono text-neutral-800 tracking-wider">{client.pin}</span></span>
+              <ResendLoginButton clientId={client.id}/>
             </div>
           </div>
         </div>
@@ -2212,14 +2292,393 @@ function MealSuggestionModal({ log, existing, onClose, onSave }) {
 }
 
 /* =========================================================
+   LEADS VIEW — inquiries from the HAM app CTA + any direct leads.
+   Columns: New (unreviewed) · Contacted (reached out, waiting) ·
+   Converted (became a client) · Archived (spam or no-go).
+   ========================================================= */
+function LeadsView({ leads, onUpdateLead, onDeleteLead, onConvertLead }) {
+  const [filter, setFilter] = useState('active'); // active | converted | archived
+  const [expandedId, setExpandedId] = useState(null);
+
+  const counts = {
+    new:       leads.filter(l => l.status === 'new').length,
+    contacted: leads.filter(l => l.status === 'contacted').length,
+    converted: leads.filter(l => l.status === 'converted').length,
+    archived:  leads.filter(l => l.status === 'archived').length,
+  };
+
+  const filtered = leads.filter(l => {
+    if (filter === 'active')    return l.status === 'new' || l.status === 'contacted';
+    if (filter === 'converted') return l.status === 'converted';
+    if (filter === 'archived')  return l.status === 'archived';
+    return true;
+  });
+
+  const timeAgo = (iso) => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins  = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days  = Math.floor(diff / 86400000);
+    if (mins < 1)  return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    if (hours < 24) return hours + 'h ago';
+    if (days < 7)   return days + 'd ago';
+    return new Date(iso).toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  };
+
+  const statusStyles = {
+    new:       'bg-brand-orange text-white',
+    contacted: 'bg-amber-100 text-amber-900 border border-amber-300',
+    converted: 'bg-emerald-100 text-emerald-900 border border-emerald-300',
+    archived:  'bg-neutral-200 text-neutral-600',
+  };
+
+  return (
+    <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="flex items-end justify-between mb-8">
+        <div>
+          <h1 className="font-display font-bold text-4xl leading-none">Leads</h1>
+          <p className="text-neutral-500 text-sm mt-2">Inquiries from the HAM app. Work them down — mark contacted, convert the good ones, archive the rest.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        <StatCard label="NEW"       value={counts.new}       accent={counts.new > 0 ? 'orange' : undefined}/>
+        <StatCard label="CONTACTED" value={counts.contacted}/>
+        <StatCard label="CONVERTED" value={counts.converted}/>
+        <StatCard label="ARCHIVED"  value={counts.archived}/>
+      </div>
+
+      <div className="flex gap-1 mb-4 border-b border-neutral-200">
+        {[
+          { id:'active',    label:'ACTIVE',    count: counts.new + counts.contacted },
+          { id:'converted', label:'CONVERTED', count: counts.converted },
+          { id:'archived',  label:'ARCHIVED',  count: counts.archived },
+        ].map(tab => (
+          <button key={tab.id} onClick={()=>setFilter(tab.id)}
+            className={`font-display font-bold tracking-[0.12em] text-xs px-4 py-2 -mb-px border-b-2 transition ${filter===tab.id ? 'border-brand-orange text-brand-black' : 'border-transparent text-neutral-500 hover:text-brand-black'}`}>
+            {tab.label} <span className="text-neutral-400 ml-1">{tab.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="text-center py-16 text-neutral-400">
+          <div className="font-display tracking-[0.2em] text-sm">
+            {filter === 'active'    && 'NO ACTIVE LEADS — YOU\'RE CAUGHT UP'}
+            {filter === 'converted' && 'NO CONVERTED LEADS YET'}
+            {filter === 'archived'  && 'NO ARCHIVED LEADS'}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map(lead => {
+            const isOpen = expandedId === lead.id;
+            return (
+              <div key={lead.id} className={`border rounded bg-white transition ${isOpen ? 'border-brand-orange shadow-sm' : 'border-neutral-200 hover:border-neutral-300'}`}>
+                <button onClick={()=>setExpandedId(isOpen ? null : lead.id)}
+                  className="w-full text-left px-5 py-4 flex items-center gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <div className="font-display font-bold text-lg leading-tight">{lead.name}</div>
+                      <span className={`font-display font-bold tracking-[0.12em] text-[10px] px-2 py-0.5 rounded uppercase ${statusStyles[lead.status]}`}>
+                        {lead.status}
+                      </span>
+                    </div>
+                    <div className="text-sm text-neutral-600 mt-0.5 truncate">
+                      {lead.email}
+                      {lead.phone && <span className="text-neutral-400 ml-2">· {lead.phone}</span>}
+                    </div>
+                  </div>
+                  <div className="text-xs text-neutral-400 font-display tracking-[0.1em] flex-shrink-0">{timeAgo(lead.created_at)}</div>
+                  <div className={`text-neutral-400 transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</div>
+                </button>
+
+                {isOpen && (
+                  <div className="border-t border-neutral-100 px-5 py-4 space-y-4 bg-neutral-50/50">
+                    {lead.message && (
+                      <div>
+                        <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">THEIR MESSAGE</div>
+                        <p className="text-sm leading-relaxed whitespace-pre-wrap text-neutral-800">{lead.message}</p>
+                      </div>
+                    )}
+
+                    <LeadCoachNotes lead={lead} onSave={(notes)=>onUpdateLead(lead.id, { coach_notes: notes })}/>
+
+                    <div className="flex flex-wrap gap-2 pt-2">
+                      {lead.status === 'new' && (
+                        <button onClick={()=>onUpdateLead(lead.id, { status:'contacted' })}
+                          className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded border border-amber-400 text-amber-900 bg-amber-50 hover:bg-amber-100 transition">
+                          MARK CONTACTED
+                        </button>
+                      )}
+                      {(lead.status === 'new' || lead.status === 'contacted') && (
+                        <>
+                          <button onClick={()=>onConvertLead(lead)}
+                            className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition">
+                            CONVERT TO CLIENT
+                          </button>
+                          <button onClick={()=>onUpdateLead(lead.id, { status:'archived' })}
+                            className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition">
+                            ARCHIVE
+                          </button>
+                        </>
+                      )}
+                      {lead.status === 'archived' && (
+                        <button onClick={()=>onUpdateLead(lead.id, { status:'new' })}
+                          className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded border border-neutral-300 text-neutral-700 hover:bg-neutral-100 transition">
+                          RESTORE TO NEW
+                        </button>
+                      )}
+                      <div className="flex-1"/>
+                      <button onClick={()=>{
+                        if (confirm('Permanently delete this lead? This cannot be undone.')) onDeleteLead(lead.id);
+                      }}
+                        className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded text-red-700 hover:bg-red-50 transition">
+                        DELETE
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Editable coach notes block inside each expanded lead row.
+function LeadCoachNotes({ lead, onSave }) {
+  const [value, setValue] = useState(lead.coach_notes || '');
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(0);
+  // If a lead updates externally, sync
+  useEffect(() => { setValue(lead.coach_notes || ''); }, [lead.id, lead.coach_notes]);
+  const dirty = value !== (lead.coach_notes || '');
+  const save = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
+    await onSave(value);
+    setSaving(false);
+    setSavedAt(Date.now());
+    setTimeout(() => setSavedAt(0), 2000);
+  };
+  return (
+    <div>
+      <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">PRIVATE NOTES (only you see these)</div>
+      <textarea rows={2} value={value} onChange={(e)=>setValue(e.target.value)}
+        placeholder="e.g. Referred by Mike. Wants to focus on post-partum body comp. Called Tue 3/12."
+        className="w-full border border-neutral-200 rounded px-3 py-2 text-sm focus:border-brand-orange resize-none bg-white transition"/>
+      {dirty && (
+        <div className="mt-2">
+          <button onClick={save} disabled={saving}
+            className="font-display font-bold tracking-[0.1em] text-xs px-3 py-1.5 rounded bg-neutral-900 hover:bg-brand-black text-white disabled:opacity-50 transition">
+            {saving ? 'SAVING…' : 'SAVE NOTES'}
+          </button>
+        </div>
+      )}
+      {savedAt > 0 && <div className="text-xs text-emerald-700 mt-1">✓ Saved</div>}
+    </div>
+  );
+}
+
+/* =========================================================
+   CLIENT LOGIN — email + 4-digit PIN.
+
+   Lives at the /client path. Separate from the coach login so
+   clients land in a clean, branded entry point that matches the
+   welcome email they just received.
+   ========================================================= */
+function ClientLogin({ onLogin }) {
+  const [email, setEmail] = useState('');
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (!email.trim() || !/^\d{4}$/.test(pin)) {
+      setError('Enter your email and 4-digit PIN.');
+      return;
+    }
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await api.post('/api/client-login', { email: email.trim(), pin });
+      onLogin(result.client);
+    } catch (err) {
+      setError(err.message || 'Login failed.');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-brand-black text-white flex items-center justify-center p-6">
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2 mb-10">
+          <div className="w-2.5 h-2.5 bg-brand-orange"/>
+          <span className="font-display font-bold text-xs tracking-[0.25em]">THE BUFFALO METHOD</span>
+        </div>
+        <h1 className="font-display font-bold text-5xl leading-none mb-2">Welcome<br/>back.</h1>
+        <p className="text-neutral-400 text-sm mb-8">Log in with the email and PIN Derek sent you.</p>
+
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-400 block mb-1.5">EMAIL</label>
+            <input type="email" autoComplete="email" autoFocus
+              value={email} onChange={(e)=>setEmail(e.target.value)}
+              disabled={submitting}
+              className="w-full bg-neutral-900 border border-neutral-700 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition disabled:opacity-60"/>
+          </div>
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-400 block mb-1.5">4-DIGIT PIN</label>
+            <input type="text" inputMode="numeric" maxLength={4} autoComplete="off"
+              value={pin} onChange={(e)=>setPin(e.target.value.replace(/\D/g, ''))}
+              disabled={submitting} placeholder="0000"
+              className="w-full bg-neutral-900 border border-neutral-700 rounded px-3 py-2.5 font-mono text-2xl tracking-[0.5em] text-center focus:border-brand-orange focus:outline-none transition disabled:opacity-60"/>
+          </div>
+
+          {error && <div className="text-red-400 text-sm bg-red-950/30 border border-red-900/50 rounded px-3 py-2">{error}</div>}
+
+          <button type="submit" disabled={submitting}
+            className="w-full bg-brand-orange hover:bg-brand-orange-dark text-white font-display font-bold tracking-[0.15em] text-sm py-3 rounded transition disabled:opacity-60 disabled:cursor-wait">
+            {submitting ? 'LOGGING IN…' : 'LOG IN'}
+          </button>
+        </form>
+
+        <p className="text-neutral-500 text-xs mt-8 leading-relaxed">
+          Lost your PIN? Text Derek directly — he'll reset it and send a new welcome email.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   CLIENT APP — post-login landing.
+
+   Phase 2 (this release): welcome, program week, start date, goals.
+   Interactive features (upload, check-in, questions, timeline) ship next.
+   ========================================================= */
+function ClientApp({ client, onLogout }) {
+  const week = weekOfProgram(client.start_date);
+  const firstName = client.name.split(/\s+/)[0] || client.name;
+
+  return (
+    <div className="min-h-screen">
+      {/* Header */}
+      <header className="bg-brand-black text-white">
+        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-2.5 h-2.5 bg-brand-orange"/>
+            <span className="font-display font-bold text-xs tracking-[0.25em] hidden sm:inline">THE BUFFALO METHOD</span>
+          </div>
+          <button onClick={onLogout}
+            className="text-xs font-display font-semibold tracking-[0.12em] text-neutral-400 hover:text-white transition">
+            LOG OUT
+          </button>
+        </div>
+      </header>
+
+      {/* Body */}
+      <div className="max-w-3xl mx-auto px-6 py-10">
+        <div className="mb-10">
+          <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-3">YOUR PROGRAM</div>
+          <h1 className="font-display font-bold text-5xl leading-none mb-2">Welcome,<br/>{firstName}.</h1>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
+          <div className="bg-white border border-neutral-200 rounded p-5">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">PROGRAM WEEK</div>
+            <div className="font-display font-bold text-3xl leading-none">
+              {client.status==='completed' ? 'Complete' : week === 0 ? 'Onboarding' : `${week} / 6`}
+            </div>
+          </div>
+          <div className="bg-white border border-neutral-200 rounded p-5">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">START DATE</div>
+            <div className="font-display font-bold text-3xl leading-none">{displayDate(client.start_date)}</div>
+          </div>
+          <div className="bg-white border border-neutral-200 rounded p-5">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">STATUS</div>
+            <div className="font-display font-bold text-3xl leading-none capitalize">{client.status}</div>
+          </div>
+        </div>
+
+        {client.goals && (
+          <div className="bg-white border border-neutral-200 rounded p-6 mb-6">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">YOUR GOALS</div>
+            <p className="text-neutral-800 leading-relaxed whitespace-pre-wrap">{client.goals}</p>
+          </div>
+        )}
+
+        <div className="bg-brand-orange/5 border border-brand-orange/30 rounded p-6 mb-6">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange mb-2">COMING NEXT</div>
+          <div className="text-neutral-800 leading-relaxed">
+            <p className="mb-2">Meal photo uploads, weekly check-ins, and your personal timeline are rolling out soon. I'll message you the moment they're live.</p>
+            <p className="text-sm text-neutral-600">Until then, keep doing what we talked about — and text me directly if anything comes up.</p>
+          </div>
+        </div>
+
+        <p className="text-neutral-500 text-sm">— Derek</p>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   CLIENT ROOT — session check + login/app routing for the /client path.
+   ========================================================= */
+function ClientRoot() {
+  const [state, setState] = useState({ loading: true, client: null });
+
+  useEffect(() => {
+    api.get('/api/me')
+      .then(me => {
+        if (me.role === 'client') setState({ loading: false, client: me.client });
+        else setState({ loading: false, client: null });
+      })
+      .catch(() => setState({ loading: false, client: null }));
+  }, []);
+
+  const logout = async () => {
+    try { await api.post('/api/logout'); } catch {}
+    setState({ loading: false, client: null });
+  };
+
+  if (state.loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-brand-black">
+        <div className="text-white/60 font-display tracking-[0.2em] text-sm">LOADING…</div>
+      </div>
+    );
+  }
+  if (!state.client) {
+    return <ClientLogin onLogin={(client)=>setState({ loading: false, client })}/>;
+  }
+  return <ClientApp client={state.client} onLogout={logout}/>;
+}
+
+/* =========================================================
    APP ROOT
    ========================================================= */
 function App() {
+  // Route by URL path: /client* → client experience, everything else → coach.
+  // Deliberately simple: no history/back handling since each side has one
+  // entry point. If path-based routing grows, switch to a real router.
+  const isClientPath = typeof window !== 'undefined' && window.location.pathname.startsWith('/client');
+  if (isClientPath) return <ClientRoot/>;
+
+  return <CoachApp/>;
+}
+
+function CoachApp() {
   // Auth state — check session on mount
   const [authState, setAuthState] = useState({ loading: true, role: null });
 
   // UI navigation state
-  const [view, setView] = useState('list'); // list | detail | workouts | template-editor | program-editor | meal-builder
+  const [view, setView] = useState('list'); // list | detail | workouts | template-editor | program-editor | meal-builder | leads
   const [selectedId, setSelectedId] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
@@ -2235,12 +2694,21 @@ function App() {
   const [templates, setTemplates] = useState([]);
   const [programs, setPrograms]   = useState([]);
   const [mealSuggestions, setMealSuggestions] = useState([]);
+  const [leads, setLeads]         = useState([]);
+  const [leadToConvert, setLeadToConvert] = useState(null); // when set, AddClientModal opens pre-filled
   const [dataLoading, setDataLoading] = useState(false);
 
   // Check session on boot
   useEffect(() => {
     api.get('/api/me')
-      .then(me => setAuthState({ loading: false, role: me.role }))
+      .then(me => {
+        // If a client accidentally lands here, route them to their own app instead of stranding them on the coach login.
+        if (me.role === 'client') {
+          window.location.replace('/client');
+          return;
+        }
+        setAuthState({ loading: false, role: me.role });
+      })
       .catch(() => setAuthState({ loading: false, role: null }));
   }, []);
 
@@ -2248,7 +2716,7 @@ function App() {
   const loadAll = useCallback(async () => {
     setDataLoading(true);
     try {
-      const [c, l, k, n, q, e, t, p, s] = await Promise.all([
+      const [c, l, k, n, q, e, t, p, s, ld] = await Promise.all([
         api.get('/api/clients'),
         api.get('/api/meal-logs'),
         api.get('/api/checkins'),
@@ -2258,9 +2726,11 @@ function App() {
         api.get('/api/templates'),
         api.get('/api/programs'),
         api.get('/api/meal-suggestions'),
+        api.get('/api/leads'),
       ]);
       setClients(c); setMealLogs(l); setCheckins(k); setNotes(n); setQuestions(q);
       setExercises(e); setTemplates(t); setPrograms(p); setMealSuggestions(s);
+      setLeads(ld);
     } catch (err) {
       console.error('Failed to load data:', err);
       alert('Failed to load data: ' + err.message);
@@ -2276,10 +2746,60 @@ function App() {
   // ---- Clients ----
   const addClient = async (data) => {
     try {
-      const created = await api.post('/api/clients', data);
+      const result = await api.post('/api/clients', data);
+      // Server response is now an envelope: { client, email_sent, email_error }
+      const created = result.client;
       setClients(prev => [created, ...prev]);
+
+      // If this client came from converting a lead, mark the lead converted
+      if (leadToConvert) {
+        try {
+          const updatedLead = await api.patch('/api/leads/' + leadToConvert.id, {
+            status: 'converted',
+            converted_to_client_id: created.id,
+          });
+          setLeads(prev => prev.map(l => l.id === updatedLead.id ? updatedLead : l));
+        } catch (e) {
+          // Client was created — don't block success, but surface the issue
+          console.warn('Client created but failed to update lead:', e.message);
+        }
+      }
+
       setAddOpen(false);
+      setLeadToConvert(null);
+
+      // Surface email delivery status. Coach needs to know whether to fall back
+      // to manual PIN delivery, so we don't silently swallow failures.
+      if (result.email_sent) {
+        // Deliberately quiet on success — don't interrupt flow with a modal.
+        console.log(`[welcome email] sent to ${created.email}`);
+      } else {
+        alert(
+          `Client ${created.name} was created, but the welcome email didn't send:\n\n` +
+          `${result.email_error || 'unknown error'}\n\n` +
+          `Text them their PIN manually, or use "Resend login" on their profile.`
+        );
+      }
     } catch (e) { alert('Failed to create client: ' + e.message); }
+  };
+  const closeAddClient = () => { setAddOpen(false); setLeadToConvert(null); };
+
+  // ---- Leads ----
+  const updateLead = async (id, patch) => {
+    try {
+      const updated = await api.patch('/api/leads/' + id, patch);
+      setLeads(prev => prev.map(l => l.id === id ? updated : l));
+    } catch (e) { alert('Failed to update lead: ' + e.message); }
+  };
+  const deleteLead = async (id) => {
+    try {
+      await api.del('/api/leads/' + id);
+      setLeads(prev => prev.filter(l => l.id !== id));
+    } catch (e) { alert('Failed to delete lead: ' + e.message); }
+  };
+  const convertLead = (lead) => {
+    setLeadToConvert(lead);
+    setAddOpen(true);
   };
 
   // ---- Meal logs ----
@@ -2408,6 +2928,7 @@ function App() {
     setView('list'); setSelectedId(null); setSelectedTemplateId(null); setSelectedProgramId(null);
     setClients([]); setMealLogs([]); setCheckins([]); setNotes([]); setQuestions([]);
     setExercises([]); setTemplates([]); setPrograms([]); setMealSuggestions([]);
+    setLeads([]);
   };
 
   const selectedClient   = clients.find(c => c.id === selectedId);
@@ -2421,13 +2942,17 @@ function App() {
   const currentSection =
     (view === 'workouts' || view === 'template-editor' || view === 'program-editor') ? 'workouts' :
     (view === 'meal-builder') ? 'meal-builder' :
+    (view === 'leads') ? 'leads' :
     'clients';
 
   const navigate = (section) => {
     if (section === 'clients')      { setView('list');         setSelectedId(null); setSelectedTemplateId(null); setSelectedProgramId(null); }
+    if (section === 'leads')        { setView('leads');        setSelectedId(null); setSelectedTemplateId(null); setSelectedProgramId(null); }
     if (section === 'workouts')     { setView('workouts');     setSelectedId(null); setSelectedTemplateId(null); setSelectedProgramId(null); }
     if (section === 'meal-builder') { setView('meal-builder'); setSelectedId(null); setSelectedTemplateId(null); setSelectedProgramId(null); }
   };
+
+  const newLeadsCount = leads.filter(l => l.status === 'new').length;
 
   // ---- Render ----
   if (authState.loading) {
@@ -2447,6 +2972,7 @@ function App() {
         onLogout={logout}
         currentSection={currentSection}
         onNavigate={navigate}
+        newLeadsCount={newLeadsCount}
       />
 
       {dataLoading && clients.length === 0 ? (
@@ -2485,6 +3011,15 @@ function App() {
 
           {view === 'meal-builder' && <MealBuilderView/>}
 
+          {view === 'leads' && (
+            <LeadsView
+              leads={leads}
+              onUpdateLead={updateLead}
+              onDeleteLead={deleteLead}
+              onConvertLead={convertLead}
+            />
+          )}
+
           {view === 'workouts' && (
             <WorkoutsView
               exercises={exercises}
@@ -2522,7 +3057,7 @@ function App() {
         </>
       )}
 
-      {addOpen && <AddClientModal onClose={()=>setAddOpen(false)} onSave={addClient}/>}
+      {addOpen && <AddClientModal onClose={closeAddClient} onSave={addClient} prefill={leadToConvert}/>}
     </div>
   );
 }
