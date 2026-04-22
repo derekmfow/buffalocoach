@@ -196,6 +196,7 @@ const Icon = {
   ChevUp: (p) => <svg {...p} viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clipRule="evenodd"/></svg>,
   ChevDn: (p) => <svg {...p} viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"/></svg>,
   Ext:    (p) => <svg {...p} viewBox="0 0 20 20" fill="currentColor"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z"/><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z"/></svg>,
+  Check:  (p) => <svg {...p} viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>,
 };
 
 /* =========================================================
@@ -2177,7 +2178,7 @@ function WorkoutsView({
   onAddExercise, onUpdateExercise, onDeleteExercise,
   onNewTemplate, onEditTemplate, onDeleteTemplate,
   onNewProgram, onEditProgram, onDeleteProgram,
-  onRunProgram, title, subtitle, canEdit,
+  onRunProgram, title, subtitle, canEdit, onBuildFromSelection,
 }) {
   const [tab, setTab] = useState('programs');
   const [philosophyOpen, setPhilosophyOpen] = useState(false);
@@ -2231,7 +2232,7 @@ function WorkoutsView({
 
       {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram} onRun={onRunProgram} canEdit={canEdit}/>}
       {tab==='templates' && <TemplatesList templates={templates} exercises={exercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate} canEdit={canEdit}/>}
-      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise} canEdit={canEdit}/>}
+      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise} canEdit={canEdit} onBuildFromSelection={onBuildFromSelection}/>}
     </div>
   );
 }
@@ -2245,11 +2246,19 @@ const CATEGORY_STYLES = {
   Accessory: 'bg-brand-orange-light text-brand-orange-dark',
 };
 
-function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
+function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit, onBuildFromSelection }) {
   const [filter, setFilter]     = useState('All');
   const [modalOpen, setModal]   = useState(false);
   const [editing, setEditing]   = useState(null);
+  // Selection is only active when the parent opts in (client side). Using a Set
+  // keeps order-of-selection stable when we hand the ids off to the editor.
+  const [selectedIds, setSelectedIds] = useState(() => []);
+  const [isSelecting, setIsSelecting] = useState(false);
   const isEditable = (ex) => !canEdit || canEdit(ex);
+  const canSelect = !!onBuildFromSelection;
+  // Actual selection mode is only on while the user has explicitly opted in —
+  // keeps the library looking like a normal library until they want to build.
+  const selectionMode = canSelect && isSelecting;
 
   const filtered = filter==='All' ? exercises : exercises.filter(e => e.muscle_group === filter);
   const grouped = MUSCLE_GROUPS.reduce((acc, mg) => {
@@ -2269,6 +2278,19 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
     setModal(false);
   };
 
+  const enterSelection = () => { setIsSelecting(true); setSelectedIds([]); };
+  const exitSelection  = () => { setIsSelecting(false); setSelectedIds([]); };
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+  const clearSelection = () => setSelectedIds([]);
+  const buildFromSelection = () => {
+    if (!selectedIds.length) return;
+    onBuildFromSelection(selectedIds);
+    setSelectedIds([]);
+    setIsSelecting(false);
+  };
+
   return (
     <>
       <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
@@ -2280,11 +2302,48 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
             </button>
           ))}
         </div>
-        <button onClick={openAdd}
-          className="bg-brand-orange hover:bg-brand-orange-dark text-white font-display font-bold tracking-[0.12em] text-sm px-4 py-2 rounded transition flex items-center gap-2">
-          <Icon.Plus className="w-4 h-4"/>NEW EXERCISE
-        </button>
+        <div className="flex gap-2 flex-wrap">
+          {canSelect && !isSelecting && (
+            <button onClick={enterSelection}
+              className="bg-brand-black hover:bg-neutral-800 text-white font-display font-bold tracking-[0.12em] text-sm px-4 py-2 rounded transition flex items-center gap-2">
+              <Icon.Plus className="w-4 h-4"/>BUILD WORKOUT DAY
+            </button>
+          )}
+          <button onClick={openAdd}
+            className="bg-brand-orange hover:bg-brand-orange-dark text-white font-display font-bold tracking-[0.12em] text-sm px-4 py-2 rounded transition flex items-center gap-2">
+            <Icon.Plus className="w-4 h-4"/>NEW EXERCISE
+          </button>
+        </div>
       </div>
+
+      {/* Build-from-selection banner — visible only while the user is actively
+          selecting. The CANCEL button gives a clear exit. */}
+      {selectionMode && (
+        <div className="bg-brand-black text-white rounded p-4 mb-5 flex items-center justify-between gap-3 flex-wrap sticky top-0 z-10">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-white/60 uppercase">Building a workout day</div>
+            <div className="font-display font-bold text-lg leading-none">
+              {selectedIds.length === 0 ? 'Tap exercises to add them' : `${selectedIds.length} selected`}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={exitSelection}
+              className="font-display font-bold tracking-[0.12em] text-[11px] text-white/70 hover:text-white px-3 py-1.5 transition">
+              CANCEL
+            </button>
+            {selectedIds.length > 0 && (
+              <button onClick={clearSelection}
+                className="font-display font-bold tracking-[0.12em] text-[11px] text-white/70 hover:text-white px-3 py-1.5 transition">
+                CLEAR
+              </button>
+            )}
+            <button onClick={buildFromSelection} disabled={!selectedIds.length}
+              className="font-display font-bold tracking-[0.12em] text-xs bg-brand-orange hover:bg-brand-orange-dark text-white disabled:bg-white/10 disabled:text-white/40 disabled:cursor-not-allowed px-4 py-2 rounded transition">
+              BUILD {selectedIds.length > 0 ? `(${selectedIds.length})` : ''}
+            </button>
+          </div>
+        </div>
+      )}
 
       {Object.keys(grouped).length === 0 ? (
         <div className="bg-white border border-dashed border-neutral-300 rounded p-12 text-center">
@@ -2305,10 +2364,27 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {items.map(ex => {
                   const editable = isEditable(ex);
+                  const selected = selectionMode && selectedIds.includes(ex.id);
+                  // In selection mode the entire card toggles selection. Edit/delete
+                  // still work via stopPropagation on their own buttons.
+                  const cardOnClick = selectionMode ? ()=>toggleSelect(ex.id) : undefined;
                   return (
-                  <div key={ex.id} className="bg-white border border-neutral-200 rounded p-4 flex flex-col">
+                  <div key={ex.id} onClick={cardOnClick}
+                    className={`bg-white border rounded p-4 flex flex-col transition ${
+                      selected ? 'border-brand-orange ring-2 ring-brand-orange/30 bg-brand-orange/5' :
+                      'border-neutral-200'
+                    } ${selectionMode ? 'cursor-pointer hover:border-brand-orange' : ''}`}>
                     <div className="flex items-start justify-between gap-2 mb-2">
-                      <h3 className="font-display font-bold text-base leading-tight flex-1">{ex.name}</h3>
+                      <div className="flex items-start gap-2 flex-1 min-w-0">
+                        {selectionMode && (
+                          <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition mt-0.5 ${
+                            selected ? 'bg-brand-orange border-brand-orange' : 'border-neutral-300 bg-white'
+                          }`}>
+                            {selected && <Icon.Check className="w-3.5 h-3.5 text-white"/>}
+                          </div>
+                        )}
+                        <h3 className="font-display font-bold text-base leading-tight flex-1 min-w-0">{ex.name}</h3>
+                      </div>
                       <div className="flex items-center gap-1 flex-shrink-0">
                         {canEdit && !editable && (
                           <span className="text-[9px] font-display font-bold tracking-[0.12em] text-brand-orange bg-brand-orange/10 px-2 py-0.5 rounded whitespace-nowrap">LIBRARY</span>
@@ -2321,9 +2397,9 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
                     {ex.notes && <p className="text-sm text-neutral-600 leading-relaxed flex-1">{ex.notes}</p>}
                     {editable && (
                       <div className="flex justify-end gap-1 mt-3 -mb-1 -mr-1">
-                        <button onClick={()=>openEdit(ex)} title="Edit"
+                        <button onClick={(e)=>{ e.stopPropagation(); openEdit(ex); }} title="Edit"
                           className="text-neutral-400 hover:text-brand-black p-1.5 transition"><Icon.Edit className="w-4 h-4"/></button>
-                        <button onClick={()=>{ if(confirm(`Delete "${ex.name}"?`)) onDelete(ex.id); }} title="Delete"
+                        <button onClick={(e)=>{ e.stopPropagation(); if(confirm(`Delete "${ex.name}"?`)) onDelete(ex.id); }} title="Delete"
                           className="text-neutral-400 hover:text-red-600 p-1.5 transition"><Icon.Trash className="w-4 h-4"/></button>
                       </div>
                     )}
@@ -4261,6 +4337,9 @@ function ClientWorkoutsLibrary({
   const [subview, setSubview] = useState('list'); // 'list' | 'template-editor' | 'program-editor'
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [selectedProgramId, setSelectedProgramId] = useState(null);
+  // Seeded exercises for a brand-new template — set when the client builds
+  // from the Exercise Library selection, cleared otherwise.
+  const [seedExercises, setSeedExercises] = useState([]);
 
   // The client sees everything they're allowed to see — coach's global library
   // PLUS their own privates. Ownership determines what they can edit.
@@ -4270,7 +4349,7 @@ function ClientWorkoutsLibrary({
   // Resolve the currently-selected item (editor mode). Clients can only enter
   // the editor for items they own — enforced by canEdit guard before opening.
   const selectedTemplate = selectedTemplateId === '__new__'
-    ? { id: null, name: '', description: '', exercises: [] }
+    ? { id: null, name: '', description: '', exercises: seedExercises }
     : templates.find(t => t.id === selectedTemplateId);
 
   const selectedProgram = selectedProgramId === '__new__'
@@ -4278,7 +4357,7 @@ function ClientWorkoutsLibrary({
     : programs.find(p => p.id === selectedProgramId);
 
   // Template editor flow
-  const openNewTemplate  = ()  => { setSelectedTemplateId('__new__'); setSubview('template-editor'); };
+  const openNewTemplate  = ()  => { setSeedExercises([]); setSelectedTemplateId('__new__'); setSubview('template-editor'); };
   const openEditTemplate = (id)=> {
     const t = templates.find(x => x.id === id);
     if (!canEdit(t)) return;  // silently ignore; UI already hides the edit button
@@ -4288,14 +4367,31 @@ function ClientWorkoutsLibrary({
     try {
       if (!selectedTemplate?.id) await onCreateTemplate(data);
       else                        await onUpdateTemplate(selectedTemplate.id, data);
-      setSelectedTemplateId(null); setSubview('list');
+      setSelectedTemplateId(null); setSeedExercises([]); setSubview('list');
     } catch (e) { alert('Save failed: ' + e.message); }
   };
-  const backFromTemplateEditor = () => { setSelectedTemplateId(null); setSubview('list'); };
+  const backFromTemplateEditor = () => { setSelectedTemplateId(null); setSeedExercises([]); setSubview('list'); };
   const deleteTemplateIfOwned = (id) => {
     const t = templates.find(x => x.id === id);
     if (!canEdit(t)) return;
     onDeleteTemplate(id);
+  };
+
+  // Build a workout day straight from the Exercise Library selection — skip
+  // the empty template step, pre-populate with the chosen exercises, and let
+  // the client name + tune sets/reps before saving.
+  const buildTemplateFromSelection = (exerciseIds) => {
+    const seeded = exerciseIds.map((id, i) => ({
+      exercise_id: id,
+      order: i + 1,
+      sets: 3,
+      reps: '8-10',
+      rest_seconds: 90,
+      rationale: '',
+    }));
+    setSeedExercises(seeded);
+    setSelectedTemplateId('__new__');
+    setSubview('template-editor');
   };
 
   // Program editor flow
@@ -4378,6 +4474,7 @@ function ClientWorkoutsLibrary({
         onEditProgram={openEditProgram}
         onDeleteProgram={deleteProgramIfOwned}
         onRunProgram={runProgram}
+        onBuildFromSelection={buildTemplateFromSelection}
       />
     </div>
   );
