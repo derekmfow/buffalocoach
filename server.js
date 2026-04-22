@@ -537,20 +537,56 @@ app.patch('/api/questions/:id', requireCoach, (req, res) => {
 });
 
 // ============================================================
-// EXERCISES (coach-only writes, both can read)
+// EXERCISES
+//
+// owner_id NULL = global (coach's library). All clients see globals.
+// owner_id = <client_id> = private to that client. Coach sees all private
+// exercises (necessary for editing a client's plan), clients see only their own.
+//
+// Writes:
+//   Coach creating: global by default. Can specify owner_id to add a private
+//     exercise for a specific client (rare — normally just additions to library).
+//   Client creating: always private (owner_id forced to their client_id).
+//   Coach can edit/delete anything. Client can edit/delete only own private.
 // ============================================================
 app.get('/api/exercises', requireAnyAuth, (req, res) => {
-  res.json(db.prepare('SELECT * FROM exercises ORDER BY muscle_group, name').all());
+  if (req.session.role === 'coach') {
+    // ?client_id=X → return globals + that client's private. Used on the coach's
+    // per-client Workout tab so the picker includes any private exercises the client added.
+    // No filter → return globals + every client's private (full picture).
+    if (req.query.client_id) {
+      const rows = db.prepare(
+        'SELECT * FROM exercises WHERE owner_id IS NULL OR owner_id = ? ORDER BY muscle_group, name'
+      ).all(req.query.client_id);
+      return res.json(rows);
+    }
+    return res.json(db.prepare('SELECT * FROM exercises ORDER BY muscle_group, name').all());
+  }
+  // Client: globals + own privates only
+  const rows = db.prepare(
+    'SELECT * FROM exercises WHERE owner_id IS NULL OR owner_id = ? ORDER BY muscle_group, name'
+  ).all(req.session.client_id);
+  res.json(rows);
 });
-app.post('/api/exercises', requireCoach, (req, res) => {
+
+app.post('/api/exercises', requireAnyAuth, (req, res) => {
   const { name, muscle_group, category, notes } = req.body;
   if (!name || !muscle_group || !category) return res.status(400).json({ error: 'name, muscle_group, category required' });
+  // Client creates always go to their private namespace. Coach creates go global.
+  const ownerId = req.session.role === 'client' ? req.session.client_id : null;
   const id = uid('e');
-  db.prepare('INSERT INTO exercises (id, name, muscle_group, category, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, name.trim(), muscle_group, category, (notes || '').trim(), today());
+  db.prepare('INSERT INTO exercises (id, name, muscle_group, category, notes, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name.trim(), muscle_group, category, (notes || '').trim(), ownerId, today());
   res.json(db.prepare('SELECT * FROM exercises WHERE id = ?').get(id));
 });
-app.patch('/api/exercises/:id', requireCoach, (req, res) => {
+
+app.patch('/api/exercises/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM exercises WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  // Client can only edit their own private exercises
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   const { name, muscle_group, category, notes } = req.body;
   const fields = [], values = [];
   if (name         !== undefined) { fields.push('name = ?');         values.push(name.trim()); }
@@ -562,7 +598,13 @@ app.patch('/api/exercises/:id', requireCoach, (req, res) => {
   db.prepare(`UPDATE exercises SET ${fields.join(', ')} WHERE id = ?`).run(...values);
   res.json(db.prepare('SELECT * FROM exercises WHERE id = ?').get(req.params.id));
 });
-app.delete('/api/exercises/:id', requireCoach, (req, res) => {
+
+app.delete('/api/exercises/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM exercises WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   db.prepare('DELETE FROM exercises WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
@@ -680,34 +722,52 @@ app.get('/api/client-programs', requireAnyAuth, (req, res) => {
 // POST — assign (or replace) a library program to a client. Coach only.
 // If a program is already assigned, it's REPLACED — the old snapshot (and any
 // client swaps) is discarded. Client is warned on the frontend first.
-app.post('/api/client-programs', requireCoach, (req, res) => {
-  const { client_id, base_program_id, coach_note } = req.body;
-  if (!client_id || !base_program_id) return res.status(400).json({ error: 'client_id and base_program_id required' });
+// POST — assign (or replace) a plan for a client.
+//   Coach: assigns to any client. May supply base_program_id to snapshot from the
+//     library, or omit it to create a blank plan.
+//   Client: creates their own plan. Only blank plans (no base_program_id) allowed
+//     from client side — clients shouldn't import coach library programs themselves.
+// Either way, replaces any existing plan for that client (UNIQUE client_id).
+app.post('/api/client-programs', requireAnyAuth, (req, res) => {
+  const clientId = req.session.role === 'coach' ? req.body.client_id : req.session.client_id;
+  const { base_program_id, coach_note, name, description } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'client_id required' });
 
-  const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(client_id);
+  const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(clientId);
   if (!client) return res.status(404).json({ error: 'client not found' });
 
-  const baseProgram = db.prepare('SELECT * FROM programs WHERE id = ?').get(base_program_id);
-  if (!baseProgram) return res.status(404).json({ error: 'base program not found' });
+  // Clients can only create blank plans (their own). Coach can use library.
+  if (req.session.role === 'client' && base_program_id) {
+    return res.status(403).json({ error: 'clients cannot import library programs — build blank or ask coach to assign' });
+  }
 
-  let days;
-  try { days = snapshotProgramDays(base_program_id); }
-  catch (e) { return res.status(500).json({ error: e.message }); }
+  let days, planName, planDescription, planNotes;
+  if (base_program_id) {
+    const baseProgram = db.prepare('SELECT * FROM programs WHERE id = ?').get(base_program_id);
+    if (!baseProgram) return res.status(404).json({ error: 'base program not found' });
+    try { days = snapshotProgramDays(base_program_id); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+    planName        = baseProgram.name;
+    planDescription = baseProgram.description || '';
+    planNotes       = baseProgram.notes || '';
+  } else {
+    // Blank plan — user supplies name or we default. No days to start.
+    days            = [];
+    planName        = (name || '').trim() || 'My Workout';
+    planDescription = (description || '').trim();
+    planNotes       = '';
+  }
 
   const nowIso = new Date().toISOString();
-
-  // Replace existing (UNIQUE on client_id). Remove first so we don't conflict.
-  db.prepare('DELETE FROM client_programs WHERE client_id = ?').run(client_id);
+  db.prepare('DELETE FROM client_programs WHERE client_id = ?').run(clientId);
 
   const id = uid('cp');
   db.prepare(
     `INSERT INTO client_programs (id, client_id, base_program_id, name, description, notes, coach_note, days, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    id, client_id, base_program_id,
-    baseProgram.name,
-    baseProgram.description || '',
-    baseProgram.notes || '',
+    id, clientId, base_program_id || null,
+    planName, planDescription, planNotes,
     (coach_note || '').trim(),
     JSON.stringify(days),
     nowIso, nowIso,
@@ -717,22 +777,30 @@ app.post('/api/client-programs', requireCoach, (req, res) => {
   res.json(parseJSONField(row, 'days'));
 });
 
-// PATCH — full edit. Coach only. Used for overriding sets/reps/rationale,
-// renaming, adding/editing coach_note, or replacing the full days array.
-app.patch('/api/client-programs/:id', requireCoach, (req, res) => {
+// PATCH — edit plan. Both coach and client (own only), but clients have
+// a narrower allowed field set: name, description, days. Coach-authored fields
+// (coach_note, notes, base_program_id) are coach-only.
+app.patch('/api/client-programs/:id', requireAnyAuth, (req, res) => {
   const existing = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const isCoach = req.session.role === 'coach';
+  if (!isCoach && existing.client_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
 
   const { name, description, notes, coach_note, days } = req.body;
   const fields = [], values = [];
   if (name        !== undefined) { fields.push('name = ?');        values.push(name.trim()); }
   if (description !== undefined) { fields.push('description = ?'); values.push((description || '').trim()); }
-  if (notes       !== undefined) { fields.push('notes = ?');       values.push((notes || '').trim()); }
-  if (coach_note  !== undefined) { fields.push('coach_note = ?');  values.push((coach_note || '').trim()); }
   if (days        !== undefined) {
     if (!Array.isArray(days)) return res.status(400).json({ error: 'days must be an array' });
     fields.push('days = ?'); values.push(JSON.stringify(days));
   }
+  // Coach-only fields — silently ignored if a client tries to send them
+  if (isCoach && notes      !== undefined) { fields.push('notes = ?');      values.push((notes || '').trim()); }
+  if (isCoach && coach_note !== undefined) { fields.push('coach_note = ?'); values.push((coach_note || '').trim()); }
+
   if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
   fields.push('updated_at = ?'); values.push(new Date().toISOString());
   values.push(req.params.id);
