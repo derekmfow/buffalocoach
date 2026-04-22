@@ -732,7 +732,7 @@ function ResendLoginButton({ clientId }) {
 /* =========================================================
    CLIENT DETAIL
    ========================================================= */
-function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onSaveMealSuggestion, onDeleteMealSuggestion, onBack }) {
+function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onSaveMealSuggestion, onDeleteMealSuggestion, onSetStatus, onDelete, onBack }) {
   const [tab, setTab] = useState('timeline');
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -817,10 +817,11 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
             { id:'checkins',  label:'Check-ins',   count:clientCheckins.length },
             { id:'questions', label:'Questions',   count:clientQuestions.length, dot: unresolvedCount > 0 },
             { id:'notes',     label:'Coach Notes', count:clientNotes.length },
+            { id:'actions',   label:'Actions' },
           ].map(t=>(
             <button key={t.id} onClick={()=>setTab(t.id)}
               className={`font-display font-semibold tracking-[0.12em] text-sm px-4 py-3 border-b-2 transition whitespace-nowrap flex items-center gap-2 ${tab===t.id ? 'border-brand-orange text-brand-black' : 'border-transparent text-neutral-500 hover:text-brand-black'}`}>
-              <span>{t.label.toUpperCase()} <span className="text-xs text-neutral-400 ml-1">({t.count})</span></span>
+              <span>{t.label.toUpperCase()}{t.count !== undefined && <span className="text-xs text-neutral-400 ml-1">({t.count})</span>}</span>
               {t.dot && <span className="w-1.5 h-1.5 rounded-full bg-brand-orange" title={`${unresolvedCount} unresolved`}></span>}
             </button>
           ))}
@@ -831,6 +832,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
       {tab==='checkins'  && <CheckinsTab checkins={clientCheckins}/>}
       {tab==='questions' && <QuestionsTab questions={clientQuestions} onToggleResolve={onToggleResolveQuestion}/>}
       {tab==='notes'     && <NotesTab notes={clientNotes} clientId={client.id} onAdd={onAddNote} onUpdate={onUpdateNote} onDelete={onDeleteNote}/>}
+      {tab==='actions'   && <ActionsTab client={client} onSetStatus={onSetStatus} onDelete={onDelete}/>}
 
       {uploadOpen && <UploadModal client={client} onClose={()=>setUploadOpen(false)} onSave={(d)=>{ onAddLog(d); setUploadOpen(false); }}/>}
     </div>
@@ -936,13 +938,13 @@ function TimelineTab({ logs, client, mealSuggestions, onSaveMealSuggestion, onDe
                               <p className="text-sm text-neutral-800 leading-relaxed mb-3 italic">"{suggestion.message}"</p>
                             )}
                             <div className="space-y-2">
-                              {suggestion.meals.map((m, i) => (
+                              {suggestion.meals.map(normalizeMeal).map((m, i) => (
                                 <div key={i} className="bg-white border border-emerald-100 rounded p-3">
                                   <div className="font-display font-bold text-sm leading-tight mb-1.5">{m.name}</div>
                                   <div className="flex flex-wrap gap-1">
-                                    <MealPill type="protein" value={m.protein}/>
-                                    {m.carb && <MealPill type="carb" value={m.carb}/>}
-                                    {m.fat  && <MealPill type="fat"  value={m.fat}/>}
+                                    {m.proteins.map(v => <MealPill key={'p-'+v} type="protein" value={v}/>)}
+                                    {m.carbs.map(v    => <MealPill key={'c-'+v} type="carb"    value={v}/>)}
+                                    {m.fats.map(v     => <MealPill key={'f-'+v} type="fat"     value={v}/>)}
                                   </div>
                                 </div>
                               ))}
@@ -1217,6 +1219,136 @@ function NotesTab({ notes, clientId, onAdd, onUpdate, onDelete }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* =========================================================
+   ACTIONS TAB — client lifecycle controls.
+
+   MVP actions: Pause / Resume / Delete. Graduate + Archive deferred.
+
+   Pause: marks status='paused' so the overdue flagging and "active"
+     filter respect it. Client can still log in (by design — they
+     might want to review their history during a break).
+   Resume: paused → active.
+   Delete: permanent. Uses type-the-name gate to avoid accidents.
+     Cascades on the server side (logs, checkins, notes, questions,
+     photos all go with the client).
+   ========================================================= */
+function ActionsTab({ client, onSetStatus, onDelete }) {
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [typedName, setTypedName] = useState('');
+  const [busy, setBusy] = useState(null); // 'pause' | 'resume' | 'delete' | null
+  const nameMatches = typedName.trim().toLowerCase() === client.name.trim().toLowerCase();
+
+  const doSetStatus = async (status) => {
+    setBusy(status === 'paused' ? 'pause' : 'resume');
+    try { await onSetStatus(client.id, status); }
+    finally { setBusy(null); }
+  };
+  const doDelete = async () => {
+    if (!nameMatches) return;
+    setBusy('delete');
+    try { await onDelete(client.id); /* onDelete navigates back to list */ }
+    catch (e) { setBusy(null); alert('Delete failed: ' + e.message); }
+  };
+
+  return (
+    <div className="space-y-3 max-w-2xl">
+      {/* PAUSE / RESUME */}
+      {client.status === 'active' && (
+        <ActionCard
+          title="Pause this client"
+          body="Mark them as paused — vacation, injury, life gets in the way, whatever. They'll still be able to log in, but won't show in the 'active' filter or trigger overdue flags. Resume anytime."
+          buttonLabel={busy === 'pause' ? 'PAUSING…' : 'PAUSE'}
+          buttonDisabled={busy !== null}
+          onClick={() => doSetStatus('paused')}
+          tone="neutral"
+        />
+      )}
+      {client.status === 'paused' && (
+        <ActionCard
+          title="Resume this client"
+          body="Move them back to active. Program week picks up where the calendar says it should based on their original start date."
+          buttonLabel={busy === 'resume' ? 'RESUMING…' : 'RESUME'}
+          buttonDisabled={busy !== null}
+          onClick={() => doSetStatus('active')}
+          tone="primary"
+        />
+      )}
+      {client.status === 'completed' && (
+        <ActionCard
+          title="Reactivate this client"
+          body="They're marked complete. If they're running another round, flip them back to active here."
+          buttonLabel={busy === 'resume' ? 'REACTIVATING…' : 'REACTIVATE'}
+          buttonDisabled={busy !== null}
+          onClick={() => doSetStatus('active')}
+          tone="primary"
+        />
+      )}
+
+      {/* DELETE */}
+      <div className="bg-white border border-red-200 rounded p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <h3 className="font-display font-bold text-xl leading-tight text-red-900">Delete permanently</h3>
+            <p className="text-sm text-neutral-700 mt-1 leading-relaxed">
+              Removes the client and <strong>all</strong> their data — meal photos, check-ins, notes, questions, suggestions. This cannot be undone and there is no backup recovery for deleted records from this button.
+            </p>
+          </div>
+          {!deleteOpen && (
+            <button onClick={()=>setDeleteOpen(true)}
+              className="font-display font-bold tracking-[0.1em] text-xs px-4 py-2 rounded border border-red-300 text-red-700 hover:bg-red-50 transition flex-shrink-0">
+              DELETE…
+            </button>
+          )}
+        </div>
+
+        {deleteOpen && (
+          <div className="mt-4 border-t border-red-100 pt-4">
+            <p className="text-sm text-neutral-800 mb-3">
+              Type <strong>{client.name}</strong> to confirm:
+            </p>
+            <input autoFocus type="text" value={typedName}
+              onChange={(e)=>setTypedName(e.target.value)}
+              placeholder={client.name}
+              className="w-full border border-neutral-300 rounded px-3 py-2 mb-3 focus:border-red-500 focus:outline-none transition"/>
+            <div className="flex gap-2">
+              <button onClick={()=>{ setDeleteOpen(false); setTypedName(''); }}
+                disabled={busy === 'delete'}
+                className="flex-1 border border-neutral-300 text-brand-black font-display font-bold tracking-[0.12em] py-2.5 rounded hover:bg-neutral-50 transition disabled:opacity-60">
+                CANCEL
+              </button>
+              <button onClick={doDelete} disabled={!nameMatches || busy === 'delete'}
+                className="flex-1 bg-red-600 hover:bg-red-700 disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.12em] py-2.5 rounded transition">
+                {busy === 'delete' ? 'DELETING…' : 'DELETE PERMANENTLY'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Small presentational helper for Pause / Resume / Reactivate cards.
+function ActionCard({ title, body, buttonLabel, buttonDisabled, onClick, tone }) {
+  const toneClasses = tone === 'primary'
+    ? 'bg-brand-orange hover:bg-brand-orange-dark text-white'
+    : 'border border-neutral-300 text-brand-black hover:bg-neutral-50';
+  return (
+    <div className="bg-white border border-neutral-200 rounded p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <h3 className="font-display font-bold text-xl leading-tight">{title}</h3>
+          <p className="text-sm text-neutral-700 mt-1 leading-relaxed">{body}</p>
+        </div>
+        <button onClick={onClick} disabled={buttonDisabled}
+          className={`font-display font-bold tracking-[0.12em] text-xs px-5 py-2.5 rounded transition flex-shrink-0 disabled:opacity-60 disabled:cursor-wait ${toneClasses}`}>
+          {buttonLabel}
+        </button>
+      </div>
     </div>
   );
 }
@@ -2041,10 +2173,29 @@ function lookupNote(type, label) {
   return (MEAL_INGREDIENTS[type].find(o => o.label === label) || {}).note || '';
 }
 
+/**
+ * normalizeMeal — upgrades a meal object to the multi-select shape.
+ *
+ * Before multi-select: meals stored as { name, protein, carb, fat } — each a string or null.
+ * After:               { name, proteins: [], carbs: [], fats: [] } — arrays, possibly empty.
+ *
+ * Call this on read (both for in-memory state and for meals loaded from the server).
+ * Safe to call on already-normalized meals.
+ */
+function normalizeMeal(m) {
+  if (!m) return { name:'', proteins:[], carbs:[], fats:[] };
+  const proteins = Array.isArray(m.proteins) ? m.proteins : (m.protein ? [m.protein] : []);
+  const carbs    = Array.isArray(m.carbs)    ? m.carbs    : (m.carb    ? [m.carb]    : []);
+  const fats     = Array.isArray(m.fats)     ? m.fats     : (m.fat     ? [m.fat]     : []);
+  return { name: m.name || '', proteins, carbs, fats };
+}
+
 function autoMealName(state) {
-  if (!state.protein) return '';
-  if (state.carb) return `${state.protein} & ${state.carb} Bowl`;
-  return `${state.protein} Bowl`;
+  const p = state.proteins?.[0];
+  const c = state.carbs?.[0];
+  if (!p) return '';
+  if (c) return `${p} & ${c} Bowl`;
+  return `${p} Bowl`;
 }
 
 /**
@@ -2054,29 +2205,43 @@ function autoMealName(state) {
  *  - compact:   if true, render tighter for modal use
  */
 function MealBuilder({ value, onChange, compact = false }) {
-  const [state, setState]   = useState({ protein:null, carb:null, fat:null });
+  // Current selection — arrays, possibly empty. Using arrays across the board keeps
+  // the add/remove/preview code uniform and makes the multi-select behavior natural.
+  const [state, setState]   = useState({ proteins:[], carbs:[], fats:[] });
   const [mealName, setName] = useState('');
 
+  // Flip a single ingredient in/out of the currently-selected array for its macro.
   const toggle = (type, label) => {
-    setState(prev => ({ ...prev, [type]: prev[type] === label ? null : label }));
+    const key = type + 's'; // 'protein' -> 'proteins'
+    setState(prev => {
+      const arr = prev[key];
+      const next = arr.includes(label) ? arr.filter(x => x !== label) : [...arr, label];
+      return { ...prev, [key]: next };
+    });
   };
+
   const addMeal = () => {
-    if (!state.protein) return;
+    if (state.proteins.length === 0) return;
     const name = mealName.trim() || autoMealName(state);
     const next = [...value, {
       name,
-      protein: state.protein,
-      carb: state.carb,
-      fat: state.fat,
+      proteins: [...state.proteins],
+      carbs:    [...state.carbs],
+      fats:     [...state.fats],
     }];
     onChange(next);
-    setState({ protein:null, carb:null, fat:null });
+    setState({ proteins:[], carbs:[], fats:[] });
     setName('');
   };
   const removeMeal = (i) => onChange(value.filter((_, idx) => idx !== i));
 
+  // Render stored meals through the normalizer so legacy single-macro rows still display.
+  const rendered = value.map(normalizeMeal);
+
   const Section = ({ type, title }) => {
+    const key = type + 's';
     const c = MACRO_COLORS[type];
+    const selected = state[key];
     return (
       <div>
         <div className="flex items-center gap-2 mb-2">
@@ -2084,16 +2249,23 @@ function MealBuilder({ value, onChange, compact = false }) {
           <span className={`font-display font-bold text-[11px] tracking-[0.12em] ${c.text}`}>
             {title.toUpperCase()}{type==='protein' && <span className="text-red-500 ml-0.5">*</span>}
           </span>
+          {selected.length > 1 && (
+            <span className="ml-auto text-[10px] font-display tracking-[0.1em] text-neutral-400">
+              {selected.length} SELECTED
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-1.5">
           {MEAL_INGREDIENTS[type].map(opt => (
             <MealChip key={opt.label} type={type} label={opt.label}
-              selected={state[type] === opt.label} onClick={()=>toggle(type, opt.label)}/>
+              selected={selected.includes(opt.label)} onClick={()=>toggle(type, opt.label)}/>
           ))}
         </div>
       </div>
     );
   };
+
+  const hasSelection = state.proteins.length > 0;
 
   return (
     <div className={compact ? '' : 'max-w-3xl mx-auto'}>
@@ -2106,43 +2278,43 @@ function MealBuilder({ value, onChange, compact = false }) {
 
         <div className="bg-neutral-50 border border-neutral-200 rounded p-3">
           <div className="font-display font-bold text-[10px] tracking-[0.12em] text-neutral-500 mb-2">MEAL PREVIEW</div>
-          {!state.protein ? (
-            <p className="text-sm text-neutral-400 italic">Select a protein to preview this meal.</p>
+          {!hasSelection ? (
+            <p className="text-sm text-neutral-400 italic">Select at least one protein to preview this meal. Tap chips to add or remove — you can select as many as you want.</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
-              <MealPill type="protein" value={state.protein}/>
-              {state.carb && <MealPill type="carb" value={state.carb}/>}
-              {state.fat  && <MealPill type="fat"  value={state.fat}/>}
+              {state.proteins.map(v => <MealPill key={'p-'+v} type="protein" value={v}/>)}
+              {state.carbs.map(v    => <MealPill key={'c-'+v} type="carb"    value={v}/>)}
+              {state.fats.map(v     => <MealPill key={'f-'+v} type="fat"     value={v}/>)}
             </div>
           )}
         </div>
 
         <Field label="Meal name" hint="Optional — auto-generated if blank.">
           <input value={mealName} onChange={(e)=>setName(e.target.value)}
-            placeholder={state.protein ? autoMealName(state) : "e.g. Post-Workout Bowl"}
+            placeholder={hasSelection ? autoMealName(state) : "e.g. Post-Workout Bowl"}
             className="w-full border border-neutral-200 rounded px-3 py-2 focus:border-brand-orange transition"/>
         </Field>
 
-        <button onClick={addMeal} disabled={!state.protein}
+        <button onClick={addMeal} disabled={!hasSelection}
           className="w-full bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.12em] py-3 rounded transition flex items-center justify-center gap-2">
           <Icon.Plus className="w-4 h-4"/>ADD MEAL TO PLAN
         </button>
       </div>
 
-      {value.length > 0 && (
+      {rendered.length > 0 && (
         <div className="mb-4">
           <div className="font-display font-bold text-[10px] tracking-[0.12em] text-neutral-500 mb-2">
-            MEAL PLAN · {value.length} {value.length===1?'MEAL':'MEALS'}
+            MEAL PLAN · {rendered.length} {rendered.length===1?'MEAL':'MEALS'}
           </div>
           <div className="space-y-2">
-            {value.map((m, i) => (
+            {rendered.map((m, i) => (
               <div key={i} className="bg-white border border-neutral-200 rounded p-3 flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="font-display font-bold text-sm leading-tight">{m.name}</div>
                   <div className="flex flex-wrap gap-1 mt-1.5">
-                    <MealPill type="protein" value={m.protein}/>
-                    {m.carb && <MealPill type="carb" value={m.carb}/>}
-                    {m.fat  && <MealPill type="fat"  value={m.fat}/>}
+                    {m.proteins.map(v => <MealPill key={'p-'+v} type="protein" value={v}/>)}
+                    {m.carbs.map(v    => <MealPill key={'c-'+v} type="carb"    value={v}/>)}
+                    {m.fats.map(v     => <MealPill key={'f-'+v} type="fat"     value={v}/>)}
                   </div>
                 </div>
                 <button onClick={()=>removeMeal(i)} title="Remove" className="text-neutral-400 hover:text-red-600 p-1 flex-shrink-0 transition">
@@ -2167,18 +2339,18 @@ function MealBuilderView() {
   const buildCopyText = () => {
     if (!meals.length) return '';
     const lines = ['=== HORMONE ALIGNED MEAL PLAN ===', ''];
-    meals.forEach((m, i) => {
+    meals.map(normalizeMeal).forEach((m, i) => {
       lines.push(`MEAL ${i+1}: ${m.name.toUpperCase()}`);
-      const pNote = lookupNote('protein', m.protein);
-      lines.push(`  Protein : ${m.protein}${pNote ? ' ('+pNote+')' : ''}`);
-      if (m.carb) {
-        const cNote = lookupNote('carb', m.carb);
-        lines.push(`  Carb    : ${m.carb}${cNote ? ' ('+cNote+')' : ''}`);
-      }
-      if (m.fat) {
-        const fNote = lookupNote('fat', m.fat);
-        lines.push(`  Fat     : ${m.fat}${fNote ? ' ('+fNote+')' : ''}`);
-      }
+      // One line per item per macro. Keeps per-item notes visible and reads cleanly in a text message.
+      const emit = (type, label, items) => {
+        items.forEach(item => {
+          const note = lookupNote(type, item);
+          lines.push(`  ${label.padEnd(7)} : ${item}${note ? ' ('+note+')' : ''}`);
+        });
+      };
+      emit('protein', 'Protein', m.proteins);
+      emit('carb',    'Carb',    m.carbs);
+      emit('fat',     'Fat',     m.fats);
       lines.push('');
     });
     lines.push('--- Derek Fowler / The Buffalo Method ---');
@@ -2784,6 +2956,26 @@ function CoachApp() {
   };
   const closeAddClient = () => { setAddOpen(false); setLeadToConvert(null); };
 
+  // ---- Client lifecycle: pause / resume / delete ----
+  const setClientStatus = async (id, status) => {
+    try {
+      const updated = await api.patch('/api/clients/' + id, { status });
+      setClients(prev => prev.map(c => c.id === id ? updated : c));
+    } catch (e) { alert('Failed to update client status: ' + e.message); }
+  };
+  const deleteClient = async (id) => {
+    await api.del('/api/clients/' + id); // let errors bubble to ActionsTab
+    // Clean up derived state for this client so the UI stays consistent
+    setClients(prev => prev.filter(c => c.id !== id));
+    setMealLogs(prev => prev.filter(l => l.client_id !== id));
+    setCheckins(prev => prev.filter(c => c.client_id !== id));
+    setNotes(prev => prev.filter(n => n.client_id !== id));
+    setQuestions(prev => prev.filter(q => q.client_id !== id));
+    // Navigate back to list — the detail view's client just went away
+    setView('list');
+    setSelectedId(null);
+  };
+
   // ---- Leads ----
   const updateLead = async (id, patch) => {
     try {
@@ -3005,6 +3197,8 @@ function CoachApp() {
               onToggleResolveQuestion={toggleResolveQuestion}
               onSaveMealSuggestion={saveMealSuggestion}
               onDeleteMealSuggestion={deleteMealSuggestion}
+              onSetStatus={setClientStatus}
+              onDelete={deleteClient}
               onBack={()=>{ setView('list'); setSelectedId(null); }}
             />
           )}
