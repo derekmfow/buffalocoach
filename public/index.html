@@ -2162,27 +2162,31 @@ function CoachPlanFooterActions({ clientProgram, programs, onChangeProgram, onUn
 
 /* =========================================================
    WORKOUTS — TOP-LEVEL CONTAINER
+
+   Shared between the coach's main Workouts page and the client's Workouts library.
+   Parent scopes the data it passes (arrays are displayed as-is, no internal filtering).
+   Coach passes globals only; client passes their own privates only.
+
+   Optional props:
+     - title / subtitle: customize the top heading (defaults to coach-oriented copy)
+     - onRunProgram(programId): show a RUN THIS button on each program card;
+         client supplies this so they can activate a program as their plan
    ========================================================= */
 function WorkoutsView({
   exercises, templates, programs,
   onAddExercise, onUpdateExercise, onDeleteExercise,
   onNewTemplate, onEditTemplate, onDeleteTemplate,
   onNewProgram, onEditProgram, onDeleteProgram,
+  onRunProgram, title, subtitle,
 }) {
   const [tab, setTab] = useState('programs');
   const [philosophyOpen, setPhilosophyOpen] = useState(false);
 
-  // The coach's main Workouts library is for THEIR curated content only.
-  // Client-private exercises (owner_id set) stay with that client — we filter
-  // them out of every list here. They remain available inside the picker on
-  // the client's Workout tab via a separate ?client_id= fetch.
-  const globalExercises = useMemo(() => exercises.filter(e => !e.owner_id), [exercises]);
-
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
       <div className="mb-4">
-        <h1 className="font-display font-bold text-4xl leading-none">Workouts</h1>
-        <p className="text-neutral-600 mt-2 text-sm">Your programs, workout days, and exercise library. Built once, used with every client.</p>
+        <h1 className="font-display font-bold text-4xl leading-none">{title || 'Workouts'}</h1>
+        <p className="text-neutral-600 mt-2 text-sm">{subtitle || 'Your programs, workout days, and exercise library. Built once, used with every client.'}</p>
       </div>
 
       <button onClick={()=>setPhilosophyOpen(v=>!v)}
@@ -2215,7 +2219,7 @@ function WorkoutsView({
           {[
             { id:'programs',  label:'Programs',         count:programs.length },
             { id:'templates', label:'Workout Days',     count:templates.length },
-            { id:'library',   label:'Exercise Library', count:globalExercises.length },
+            { id:'library',   label:'Exercise Library', count:exercises.length },
           ].map(t => (
             <button key={t.id} onClick={()=>setTab(t.id)}
               className={`font-display font-semibold tracking-[0.12em] text-sm px-4 py-3 border-b-2 transition whitespace-nowrap ${tab===t.id ? 'border-brand-orange text-brand-black' : 'border-transparent text-neutral-500 hover:text-brand-black'}`}>
@@ -2225,9 +2229,9 @@ function WorkoutsView({
         </div>
       </div>
 
-      {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram}/>}
-      {tab==='templates' && <TemplatesList templates={templates} exercises={globalExercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate}/>}
-      {tab==='library'   && <ExerciseLibrary exercises={globalExercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise}/>}
+      {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram} onRun={onRunProgram}/>}
+      {tab==='templates' && <TemplatesList templates={templates} exercises={exercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate}/>}
+      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise}/>}
     </div>
   );
 }
@@ -2749,8 +2753,12 @@ function TemplateEditor({ template, exercises, onSave, onBack }) {
 /* =========================================================
    PROGRAMS LIST
    ========================================================= */
-function ProgramsList({ programs, templates, onNew, onEdit, onDelete }) {
+function ProgramsList({ programs, templates, onNew, onEdit, onDelete, onRun }) {
   const tplName = (id) => templates.find(t => t.id === id)?.name || '(missing)';
+  const handleRun = (p) => {
+    if (!confirm(`Set "${p.name}" as your active workout? This replaces your current plan.`)) return;
+    onRun(p.id);
+  };
   return (
     <>
       <div className="flex items-center justify-end mb-5">
@@ -2795,12 +2803,20 @@ function ProgramsList({ programs, templates, onNew, onEdit, onDelete }) {
                   </div>
                 )}
               </button>
-              <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50">
+              <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50 gap-2">
                 <button onClick={()=>onEdit(p.id)} className="text-xs font-display font-bold tracking-[0.12em] text-brand-black hover:text-brand-orange transition">
                   EDIT PROGRAM →
                 </button>
-                <button onClick={()=>{ if(confirm(`Delete program "${p.name}"?`)) onDelete(p.id); }} title="Delete"
-                  className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
+                <div className="flex items-center gap-2">
+                  {onRun && (
+                    <button onClick={()=>handleRun(p)}
+                      className="text-xs font-display font-bold tracking-[0.12em] bg-brand-orange text-white hover:bg-brand-orange-dark px-3 py-1.5 rounded transition">
+                      RUN THIS
+                    </button>
+                  )}
+                  <button onClick={()=>{ if(confirm(`Delete program "${p.name}"?`)) onDelete(p.id); }} title="Delete"
+                    className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
+                </div>
               </div>
             </div>
           ))}
@@ -3631,17 +3647,25 @@ function ClientHome({ client, firstName, week, mealLogs, checkins, clientProgram
         <div className="text-white/90 text-sm">Photos of what you ate. Up to 5 per day.</div>
       </button>
 
-      {/* MY WORKOUT — reference they'll open often */}
-      <button onClick={()=>onGo('workout')}
-        className="w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-5 mb-3 text-left transition active:scale-[0.99]">
-        <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">TRAINING</div>
-        <div className="font-display font-bold text-2xl leading-tight mb-1">My Workout</div>
-        <div className="text-neutral-600 text-sm">
-          {clientProgram
-            ? `${clientProgram.name} · ${programDayCount} day${programDayCount===1?'':'s'} in rotation`
-            : "No plan assigned yet — text Derek to get started"}
-        </div>
-      </button>
+      {/* MY WORKOUT — active plan + WORKOUTS — library for building their own */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <button onClick={()=>onGo('workout')}
+          className="bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-5 text-left transition active:scale-[0.99]">
+          <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">TRAINING</div>
+          <div className="font-display font-bold text-2xl leading-tight mb-1">My Workout</div>
+          <div className="text-neutral-600 text-sm">
+            {clientProgram
+              ? `${clientProgram.name} · ${programDayCount} day${programDayCount===1?'':'s'}`
+              : "No active plan — build one or ask Derek"}
+          </div>
+        </button>
+        <button onClick={()=>onGo('workouts')}
+          className="bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-5 text-left transition active:scale-[0.99]">
+          <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">LIBRARY</div>
+          <div className="font-display font-bold text-2xl leading-tight mb-1">Workouts</div>
+          <div className="text-neutral-600 text-sm">Build programs, workout days, and exercises</div>
+        </button>
+      </div>
 
       {/* SECONDARY ACTIONS */}
       <div className="grid grid-cols-2 gap-3 mb-3">
@@ -4168,8 +4192,131 @@ function ClientWorkoutView({ clientProgram, exercises, onUpdate, onCreateExercis
 }
 
 
+/* ---------- WORKOUTS LIBRARY ----------
+
+   Client-side mirror of the coach's Workouts page. They have their own Programs,
+   Workout Days, and Exercise Library they've built. Reuses the shared WorkoutsView
+   along with the coach's TemplateEditor / ProgramEditor in a self-contained wrapper
+   that manages its own list ↔ editor sub-navigation.
+
+   "RUN THIS" button on a program sets it as the client's active plan (replaces
+   whatever they were running). Server enforces ownership.
+   ---------- */
+function ClientWorkoutsLibrary({
+  client, exercises, templates, programs,
+  onCreateExercise, onUpdateExercise, onDeleteExercise,
+  onCreateTemplate, onUpdateTemplate, onDeleteTemplate,
+  onCreateProgram, onUpdateProgram, onDeleteProgram,
+  onRunProgram, onBack,
+}) {
+  const [subview, setSubview] = useState('list'); // 'list' | 'template-editor' | 'program-editor'
+  const [selectedTemplateId, setSelectedTemplateId] = useState(null);
+  const [selectedProgramId, setSelectedProgramId] = useState(null);
+
+  // Client scope: only their own items — keeps the library view focused on
+  // what they manage. Globals live in the picker on the My Workout editor.
+  const ownExercises = useMemo(() => exercises.filter(e => e.owner_id === client.id), [exercises, client.id]);
+  const ownTemplates = useMemo(() => templates.filter(t => t.owner_id === client.id), [templates, client.id]);
+  const ownPrograms  = useMemo(() => programs.filter(p => p.owner_id === client.id), [programs, client.id]);
+
+  // Resolve the currently-selected item, treating '__new__' as a fresh skeleton.
+  const selectedTemplate = selectedTemplateId === '__new__'
+    ? { id: null, name: '', description: '', exercises: [] }
+    : ownTemplates.find(t => t.id === selectedTemplateId);
+
+  const selectedProgram = selectedProgramId === '__new__'
+    ? { id: null, name: '', description: '', notes: '', days: [] }
+    : ownPrograms.find(p => p.id === selectedProgramId);
+
+  // Template editor flow
+  const openNewTemplate  = ()  => { setSelectedTemplateId('__new__'); setSubview('template-editor'); };
+  const openEditTemplate = (id)=> { setSelectedTemplateId(id);        setSubview('template-editor'); };
+  const saveTemplate = async (data) => {
+    try {
+      if (!selectedTemplate?.id) await onCreateTemplate(data);
+      else                        await onUpdateTemplate(selectedTemplate.id, data);
+      setSelectedTemplateId(null); setSubview('list');
+    } catch (e) { alert('Save failed: ' + e.message); }
+  };
+  const backFromTemplateEditor = () => { setSelectedTemplateId(null); setSubview('list'); };
+
+  // Program editor flow
+  const openNewProgram  = ()  => { setSelectedProgramId('__new__'); setSubview('program-editor'); };
+  const openEditProgram = (id)=> { setSelectedProgramId(id);        setSubview('program-editor'); };
+  const saveProgram = async (data) => {
+    try {
+      if (!selectedProgram?.id) await onCreateProgram(data);
+      else                       await onUpdateProgram(selectedProgram.id, data);
+      setSelectedProgramId(null); setSubview('list');
+    } catch (e) { alert('Save failed: ' + e.message); }
+  };
+  const backFromProgramEditor = () => { setSelectedProgramId(null); setSubview('list'); };
+
+  // RUN THIS handler — surfaces server errors to the user.
+  const runProgram = async (id) => {
+    try { await onRunProgram(id); alert('Active plan set. Tap "My Workout" on home to run it.'); }
+    catch (e) { alert('Failed: ' + e.message); }
+  };
+
+  if (subview === 'template-editor' && selectedTemplate) {
+    // TemplateEditor needs ALL exercises (globals + own) so they can pick any.
+    return (
+      <TemplateEditor
+        template={selectedTemplate}
+        exercises={exercises}
+        onSave={saveTemplate}
+        onBack={backFromTemplateEditor}
+      />
+    );
+  }
+  if (subview === 'program-editor' && selectedProgram) {
+    // ProgramEditor needs the client's own templates (their library).
+    return (
+      <ProgramEditor
+        program={selectedProgram}
+        templates={ownTemplates}
+        onSave={saveProgram}
+        onBack={backFromProgramEditor}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div className="px-4 sm:px-6 pt-6"><BackLink onClick={onBack}/></div>
+      <WorkoutsView
+        exercises={ownExercises}
+        templates={ownTemplates}
+        programs={ownPrograms}
+        title="Workouts"
+        subtitle="Your programs, workout days, and exercise library."
+        onAddExercise={onCreateExercise}
+        onUpdateExercise={onUpdateExercise}
+        onDeleteExercise={onDeleteExercise}
+        onNewTemplate={openNewTemplate}
+        onEditTemplate={openEditTemplate}
+        onDeleteTemplate={onDeleteTemplate}
+        onNewProgram={openNewProgram}
+        onEditProgram={openEditProgram}
+        onDeleteProgram={onDeleteProgram}
+        onRunProgram={runProgram}
+      />
+    </div>
+  );
+}
+
+
 /* ---------- ROUTER ---------- */
-function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, clientProgram, exercises, onAddMealLog, onSaveCheckin, onPostQuestion, onUpdateClientProgram, onCreateBlankPlan, onCreateExercise, onLogout }) {
+function ClientApp({
+  client, mealLogs, checkins, questions, mealSuggestions, clientProgram,
+  exercises, templates, programs,
+  onAddMealLog, onSaveCheckin, onPostQuestion,
+  onUpdateClientProgram, onCreateBlankPlan,
+  onCreateExercise, onUpdateExercise, onDeleteExercise,
+  onCreateTemplate, onUpdateTemplate, onDeleteTemplate,
+  onCreateProgram, onUpdateProgram, onDeleteProgram,
+  onRunProgram, onLogout,
+}) {
   const [view, setView] = useState('home');
   const goHome = () => setView('home');
   const firstName = client.name.split(/\s+/)[0] || client.name;
@@ -4185,6 +4332,15 @@ function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, cli
         {view === 'questions' && <ClientQuestionsView questions={questions} onPost={onPostQuestion} onBack={goHome}/>}
         {view === 'timeline'  && <ClientTimelineView  client={client} mealLogs={mealLogs} checkins={checkins} mealSuggestions={mealSuggestions} onBack={goHome}/>}
         {view === 'workout'   && <ClientWorkoutView   clientProgram={clientProgram} exercises={exercises} onUpdate={onUpdateClientProgram} onCreateExercise={onCreateExercise} onCreateBlankPlan={onCreateBlankPlan} onBack={goHome}/>}
+        {view === 'workouts'  && <ClientWorkoutsLibrary
+          client={client}
+          exercises={exercises} templates={templates} programs={programs}
+          onCreateExercise={onCreateExercise} onUpdateExercise={onUpdateExercise} onDeleteExercise={onDeleteExercise}
+          onCreateTemplate={onCreateTemplate} onUpdateTemplate={onUpdateTemplate} onDeleteTemplate={onDeleteTemplate}
+          onCreateProgram={onCreateProgram}   onUpdateProgram={onUpdateProgram}   onDeleteProgram={onDeleteProgram}
+          onRunProgram={onRunProgram}
+          onBack={goHome}
+        />}
       </div>
     </div>
   );
@@ -4200,6 +4356,8 @@ function ClientRoot() {
   const [questions, setQuestions]             = useState([]);
   const [mealSuggestions, setMealSuggestions] = useState([]);
   const [exercises, setExercises]             = useState([]);
+  const [templates, setTemplates]             = useState([]);
+  const [programs, setPrograms]               = useState([]);
   const [clientProgram, setClientProgram]     = useState(null);
 
   useEffect(() => {
@@ -4213,16 +4371,18 @@ function ClientRoot() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [logs, cks, qs, sugs, exs, prog] = await Promise.all([
+      const [logs, cks, qs, sugs, exs, tmpls, progs, prog] = await Promise.all([
         api.get('/api/meal-logs'),
         api.get('/api/checkins'),
         api.get('/api/questions'),
         api.get('/api/meal-suggestions'),
         api.get('/api/exercises'),
+        api.get('/api/templates'),
+        api.get('/api/programs'),
         api.get('/api/client-programs'),   // returns null if unassigned
       ]);
       setMealLogs(logs); setCheckins(cks); setQuestions(qs); setMealSuggestions(sugs);
-      setExercises(exs); setClientProgram(prog);
+      setExercises(exs); setTemplates(tmpls); setPrograms(progs); setClientProgram(prog);
     } catch (e) {
       console.error('[client] load failed:', e);
     }
@@ -4234,7 +4394,7 @@ function ClientRoot() {
     try { await api.post('/api/logout'); } catch {}
     setState({ loading: false, client: null });
     setMealLogs([]); setCheckins([]); setQuestions([]); setMealSuggestions([]);
-    setExercises([]); setClientProgram(null);
+    setExercises([]); setTemplates([]); setPrograms([]); setClientProgram(null);
   };
 
   // ---- Write handlers — optimistic state updates ----
@@ -4282,6 +4442,62 @@ function ClientRoot() {
     return created;
   };
 
+  const updateExercise = async (id, patch) => {
+    const updated = await api.patch('/api/exercises/' + id, patch);
+    setExercises(prev => prev.map(e => e.id === id ? updated : e));
+    return updated;
+  };
+
+  const deleteExercise = async (id) => {
+    await api.del('/api/exercises/' + id);
+    setExercises(prev => prev.filter(e => e.id !== id));
+  };
+
+  // ---- Templates (client-private) ----
+  const createTemplate = async (data) => {
+    const created = await api.post('/api/templates', data);
+    setTemplates(prev => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+    return created;
+  };
+
+  const updateTemplate = async (id, patch) => {
+    const updated = await api.patch('/api/templates/' + id, patch);
+    setTemplates(prev => prev.map(t => t.id === id ? updated : t));
+    return updated;
+  };
+
+  const deleteTemplate = async (id) => {
+    await api.del('/api/templates/' + id);
+    setTemplates(prev => prev.filter(t => t.id !== id));
+  };
+
+  // ---- Programs (client-private) ----
+  const createProgram = async (data) => {
+    const created = await api.post('/api/programs', data);
+    setPrograms(prev => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+    return created;
+  };
+
+  const updateProgram = async (id, patch) => {
+    const updated = await api.patch('/api/programs/' + id, patch);
+    setPrograms(prev => prev.map(p => p.id === id ? updated : p));
+    return updated;
+  };
+
+  const deleteProgram = async (id) => {
+    await api.del('/api/programs/' + id);
+    setPrograms(prev => prev.filter(p => p.id !== id));
+  };
+
+  // "Run" one of the client's own programs — snapshots into their active plan,
+  // replacing whatever was there. Server enforces that the program must be owned
+  // by the client.
+  const runProgram = async (programId) => {
+    const saved = await api.post('/api/client-programs', { base_program_id: programId });
+    setClientProgram(saved);
+    return saved;
+  };
+
   if (state.loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-brand-black">
@@ -4301,12 +4517,23 @@ function ClientRoot() {
       mealSuggestions={mealSuggestions}
       clientProgram={clientProgram}
       exercises={exercises}
+      templates={templates}
+      programs={programs}
       onAddMealLog={addMealLog}
       onSaveCheckin={saveCheckin}
       onPostQuestion={postQuestion}
       onUpdateClientProgram={updateClientProgram}
       onCreateBlankPlan={createBlankPlan}
       onCreateExercise={createExercise}
+      onUpdateExercise={updateExercise}
+      onDeleteExercise={deleteExercise}
+      onCreateTemplate={createTemplate}
+      onUpdateTemplate={updateTemplate}
+      onDeleteTemplate={deleteTemplate}
+      onCreateProgram={createProgram}
+      onUpdateProgram={updateProgram}
+      onDeleteProgram={deleteProgram}
+      onRunProgram={runProgram}
       onLogout={logout}
     />
   );
@@ -4771,9 +4998,9 @@ function CoachApp() {
 
           {view === 'workouts' && (
             <WorkoutsView
-              exercises={exercises}
-              templates={templates}
-              programs={programs}
+              exercises={exercises.filter(e => !e.owner_id)}
+              templates={templates.filter(t => !t.owner_id)}
+              programs={programs.filter(p => !p.owner_id)}
               onAddExercise={addExercise}
               onUpdateExercise={updateExercise}
               onDeleteExercise={deleteExercise}
@@ -4798,7 +5025,7 @@ function CoachApp() {
           {view === 'program-editor' && selectedProgram && (
             <ProgramEditor
               program={selectedProgram}
-              templates={templates}
+              templates={templates.filter(t => !t.owner_id)}
               onSave={saveProgram}
               onBack={()=>{ setSelectedProgramId(null); setView('workouts'); }}
             />
