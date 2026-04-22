@@ -16,7 +16,10 @@ Project structure
 ├── backup.js           Nightly DB + photo backups, emailed via Resend
 ├── package.json
 ├── public/
-│   └── index.html      React app (all-in-one, no build step)
+│   ├── index.html      React app (all-in-one, no build step)
+│   ├── manifest.webmanifest   PWA manifest (install-to-home-screen)
+│   ├── sw.js           Minimal pass-through service worker (installability only, no caching)
+│   └── icons/          App icons (192, 512, maskable 512, apple-touch 180)
 ├── .gitignore
 └── README.md           this file
 ```
