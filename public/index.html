@@ -2,8 +2,22 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>The Buffalo Method — Coach Dashboard</title>
+
+<!-- PWA / install-to-home-screen. Covers Chrome/Android (manifest + SW) and iOS
+     (apple-* meta tags). theme-color matches the brand orange so the address bar
+     and status bar tint correctly when installed. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#E8611A">
+<meta name="description" content="The Buffalo Method — coaching app for meal logs, weekly check-ins, and workouts.">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Buffalo Method">
+<meta name="mobile-web-app-capable" content="yes">
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,6 +52,19 @@
   input:focus, select:focus, textarea:focus { outline: none; }
   input[type="file"].hidden-file { display: none; }
   button:focus-visible, a:focus-visible { outline: 2px solid #E8611A; outline-offset: 2px; border-radius: 3px; }
+
+  /* -------- PRINT / EXPORT VIEW --------
+     The app mounts a <div id="bm-print-root"> alongside #root (see bottom of
+     script). It's hidden on screen; @media print hides #root and shows it.
+     Inline styles inside the print view do most of the visual work — these
+     rules just handle the show/hide switch and a few page-level bits. */
+  #bm-print-root { display: none; }
+  @media print {
+    @page { margin: 0.5in; }
+    html, body { background: #fff !important; }
+    #root { display: none !important; }
+    #bm-print-root { display: block !important; }
+  }
 </style>
 <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -45,6 +72,24 @@
 </head>
 <body>
 <div id="root"></div>
+<!-- Print target. WorkoutPlanEditor writes into this (via React portal) when
+     the user clicks PRINT, then calls window.print(). Hidden on screen via
+     the CSS rule above; shown when the media type is print. -->
+<div id="bm-print-root"></div>
+
+<script>
+  // Register the service worker. A SW is required for Chrome/Android's install
+  // prompt. Ours is a no-op pass-through (see public/sw.js) — no caching, no
+  // offline behavior, just a formality to unlock installability. Wrapped in
+  // a feature check so nothing explodes in browsers without SW support.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('[sw] registration failed:', err.message);
+      });
+    });
+  }
+</script>
 
 <script type="text/babel">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
@@ -1495,9 +1540,120 @@ function WorkoutPlanEditor({ plan, mode, exercises, onUpdate, onCreateExercise }
     } catch (e) { alert('Failed: ' + e.message); }
   };
 
+  // ----- EXPORT / PRINT -----
+  // Builds a plain-text version of the whole plan. Same content as the printed
+  // view, minus the styling. Suitable for pasting into Notes, text messages,
+  // or anywhere else a workout gets shared.
+  const buildPlanText = () => {
+    const lines = [];
+    lines.push(plan.name);
+    if (plan.description) lines.push(plan.description);
+    lines.push('');
+    if (!isCoach && plan.coach_note) {
+      lines.push('NOTE FROM DEREK');
+      lines.push(plan.coach_note);
+      lines.push('');
+    }
+    if (plan.notes) {
+      lines.push('HOW TO RUN THIS');
+      lines.push(plan.notes);
+      lines.push('');
+    }
+    plan.days.forEach((day, di) => {
+      lines.push('────────────────────────');
+      lines.push(`DAY ${di+1} — ${day.label}`);
+      lines.push('────────────────────────');
+      if (!day.exercises.length) {
+        lines.push('(no exercises)');
+      } else {
+        day.exercises.forEach((slot, ei) => {
+          const ex = exById[slot.exercise_id];
+          const name = ex ? ex.name : '(exercise removed)';
+          lines.push(`${ei+1}. ${name}`);
+          if (ex) lines.push(`   ${ex.muscle_group} · ${ex.category}`);
+          const rest = slot.rest_seconds != null ? `${slot.rest_seconds}s` : '—';
+          lines.push(`   Sets: ${slot.sets}    Reps: ${slot.reps}    Rest: ${rest}`);
+          if (slot.rationale) lines.push(`   Note: ${slot.rationale}`);
+          lines.push('');
+        });
+      }
+    });
+    lines.push('');
+    lines.push('— The Buffalo Method');
+    return lines.join('\n');
+  };
+
+  // Copy button UX: one-shot success message that auto-clears. The clipboard
+  // API is async and secure-context only; on older / insecure browsers, fall
+  // back to the legacy execCommand path via a throwaway textarea.
+  const [copyState, setCopyState] = useState('idle'); // idle | copied | failed
+  const copyAsText = async () => {
+    const text = buildPlanText();
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!ok) throw new Error('execCommand copy failed');
+      }
+      setCopyState('copied');
+      setTimeout(() => setCopyState('idle'), 2000);
+    } catch (e) {
+      console.error('[copy] failed:', e);
+      setCopyState('failed');
+      setTimeout(() => setCopyState('idle'), 3000);
+    }
+  };
+
+  // Render a print-only version of the plan into <div id="bm-print-root">
+  // using a React portal. CSS in the head (#bm-print-root / @media print)
+  // handles the show/hide switch. After window.print(), the portal is torn
+  // down so the print DOM isn't hanging around.
+  const [printing, setPrinting] = useState(false);
+  const printPlan = () => {
+    setPrinting(true);
+    // Give React a tick to render the portal before firing the print dialog.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try { window.print(); } catch (e) { console.error('[print] failed:', e); }
+        // Tear down whether the user printed or cancelled. Short delay gives
+        // Safari / Firefox a moment to dismiss the print UI before the
+        // document repaints.
+        setTimeout(() => setPrinting(false), 400);
+      });
+    });
+  };
+
   return (
     <div>
       <EditablePlanHeader plan={plan} mode={mode} onUpdate={onUpdate}/>
+
+      {/* Export toolbar — surfaces on both coach and client sides, since the
+          editor is shared. COPY writes a text dump to the clipboard; PRINT
+          opens the system print dialog against a hidden portaled view. */}
+      <div className="flex items-center gap-2 mb-4 -mt-1">
+        <button onClick={copyAsText}
+          className={`font-display font-bold tracking-[0.12em] text-[11px] px-3 py-1.5 rounded border transition ${
+            copyState === 'copied' ? 'border-green-600 text-green-700 bg-green-50' :
+            copyState === 'failed' ? 'border-red-500 text-red-600 bg-red-50' :
+            'border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black'
+          }`}>
+          {copyState === 'copied' ? 'COPIED ✓' : copyState === 'failed' ? 'COPY FAILED' : 'COPY AS TEXT'}
+        </button>
+        <button onClick={printPlan}
+          className="font-display font-bold tracking-[0.12em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black transition">
+          PRINT
+        </button>
+      </div>
+
+      {printing && ReactDOM.createPortal(
+        <PrintablePlan plan={plan} exById={exById} isCoach={isCoach}/>,
+        document.getElementById('bm-print-root')
+      )}
 
       {isCoach && (
         <CoachPlanNote plan={plan} onUpdate={onUpdate}/>
@@ -1603,6 +1759,91 @@ function WorkoutPlanEditor({ plan, mode, exercises, onUpdate, onCreateExercise }
           onClose={()=>setPickerState(null)}
         />
       )}
+    </div>
+  );
+}
+
+// Print-friendly rendering of a plan. Mounted into #bm-print-root (outside
+// #root) via React portal only while PRINT is active. Styles are inline so
+// the print DOM doesn't depend on Tailwind being parsed into print rules,
+// and so nothing on screen can bleed into the printed output.
+function PrintablePlan({ plan, exById, isCoach }) {
+  const S = {
+    wrap:       { fontFamily: '"Barlow", system-ui, -apple-system, sans-serif', color: '#1A1A1A', padding: '24px 32px', maxWidth: '8in', margin: '0 auto', background: '#fff' },
+    brand:      { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '11px', letterSpacing: '0.25em', fontWeight: 700, color: '#E8611A', textTransform: 'uppercase', borderLeft: '3px solid #E8611A', paddingLeft: '10px', marginBottom: '18px' },
+    planName:   { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '32px', fontWeight: 800, lineHeight: 1.05, margin: '0 0 4px 0' },
+    planDesc:   { fontSize: '13px', color: '#4b4b4b', margin: '0 0 20px 0' },
+    calloutWrap:{ border: '1px solid #E5DFD4', background: '#F5F1EA', borderRadius: '4px', padding: '10px 14px', marginBottom: '16px' },
+    calloutLab: { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '10px', fontWeight: 700, letterSpacing: '0.15em', color: '#E8611A', textTransform: 'uppercase', marginBottom: '4px' },
+    calloutBod: { fontSize: '13px', lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 },
+    dayWrap:    { pageBreakInside: 'avoid', breakInside: 'avoid', marginTop: '18px', borderTop: '2px solid #1A1A1A', paddingTop: '10px' },
+    dayHead:    { display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '6px' },
+    dayTag:     { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '22px', fontWeight: 800, color: '#E8611A', lineHeight: 1 },
+    dayLabel:   { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '20px', fontWeight: 700, lineHeight: 1 },
+    exRow:      { pageBreakInside: 'avoid', breakInside: 'avoid', padding: '8px 0', borderBottom: '1px dashed #d4d4d4' },
+    exTopRow:   { display: 'flex', alignItems: 'baseline', gap: '8px' },
+    exNum:      { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontWeight: 800, fontSize: '15px', color: '#999', width: '22px', flexShrink: 0 },
+    exName:     { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontWeight: 700, fontSize: '16px' },
+    exMeta:     { fontFamily: '"Barlow Condensed", system-ui, sans-serif', fontSize: '10px', fontWeight: 700, letterSpacing: '0.1em', color: '#777', textTransform: 'uppercase', marginLeft: '8px' },
+    exStats:    { fontSize: '13px', marginTop: '3px', marginLeft: '30px', display: 'flex', gap: '18px', flexWrap: 'wrap' },
+    exStatLab:  { color: '#777' },
+    exStatVal:  { fontWeight: 700 },
+    exNote:     { fontSize: '12px', marginTop: '3px', marginLeft: '30px', color: '#555', fontStyle: 'italic', lineHeight: 1.4 },
+    empty:      { fontSize: '13px', color: '#888', fontStyle: 'italic', marginLeft: '30px', padding: '4px 0' },
+    footer:     { marginTop: '28px', paddingTop: '10px', borderTop: '1px solid #e5e5e5', fontSize: '11px', color: '#888', textAlign: 'right' },
+  };
+
+  return (
+    <div style={S.wrap}>
+      <div style={S.brand}>The Buffalo Method</div>
+      <h1 style={S.planName}>{plan.name}</h1>
+      {plan.description && <p style={S.planDesc}>{plan.description}</p>}
+
+      {!isCoach && plan.coach_note && (
+        <div style={S.calloutWrap}>
+          <div style={S.calloutLab}>Note from Derek</div>
+          <p style={S.calloutBod}>{plan.coach_note}</p>
+        </div>
+      )}
+      {plan.notes && (
+        <div style={S.calloutWrap}>
+          <div style={{...S.calloutLab, color: '#6b6b6b'}}>How to run this</div>
+          <p style={S.calloutBod}>{plan.notes}</p>
+        </div>
+      )}
+
+      {plan.days.map((day, di) => (
+        <div key={di} style={S.dayWrap}>
+          <div style={S.dayHead}>
+            <div style={S.dayTag}>D{di+1}</div>
+            <div style={S.dayLabel}>{day.label}</div>
+          </div>
+          {day.exercises.length === 0 ? (
+            <div style={S.empty}>No exercises.</div>
+          ) : day.exercises.map((slot, ei) => {
+            const ex = exById[slot.exercise_id];
+            return (
+              <div key={ei} style={S.exRow}>
+                <div style={S.exTopRow}>
+                  <div style={S.exNum}>{ei+1}.</div>
+                  <div>
+                    <span style={S.exName}>{ex ? ex.name : '(exercise removed)'}</span>
+                    {ex && <span style={S.exMeta}>{ex.muscle_group} · {ex.category}</span>}
+                  </div>
+                </div>
+                <div style={S.exStats}>
+                  <span><span style={S.exStatLab}>Sets:</span> <span style={S.exStatVal}>{slot.sets}</span></span>
+                  <span><span style={S.exStatLab}>Reps:</span> <span style={S.exStatVal}>{slot.reps}</span></span>
+                  <span><span style={S.exStatLab}>Rest:</span> <span style={S.exStatVal}>{slot.rest_seconds != null ? slot.rest_seconds + 's' : '—'}</span></span>
+                </div>
+                {slot.rationale && <div style={S.exNote}>{slot.rationale}</div>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      <div style={S.footer}>Printed from The Buffalo Method coaching app</div>
     </div>
   );
 }
@@ -4737,6 +4978,10 @@ function CoachApp() {
   const [addOpen, setAddOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [selectedProgramId, setSelectedProgramId] = useState(null);
+  // When the coach uses BUILD WORKOUT DAY from the Exercise Library, these
+  // pre-populate the new template so the editor opens with the selected
+  // exercises already in place. Cleared on save or back out.
+  const [seedTemplateExercises, setSeedTemplateExercises] = useState([]);
 
   // Data — all start empty, get populated from the API
   const [clients, setClients]     = useState([]);
@@ -4997,8 +5242,25 @@ function CoachApp() {
   };
 
   // ---- Templates ----
-  const newTemplate  = () => { setSelectedTemplateId('__new__'); setView('template-editor'); };
+  const newTemplate  = () => { setSeedTemplateExercises([]); setSelectedTemplateId('__new__'); setView('template-editor'); };
   const editTemplate = (id) => { setSelectedTemplateId(id); setView('template-editor'); };
+  // Build a workout day straight from the Exercise Library selection. Same
+  // pattern as the client side (ClientWorkoutsLibrary.buildTemplateFromSelection) —
+  // pre-populate a new template with the chosen exercises, let the coach name
+  // and tune sets/reps before saving.
+  const buildTemplateFromSelection = (exerciseIds) => {
+    const seeded = exerciseIds.map((id, i) => ({
+      exercise_id: id,
+      order: i + 1,
+      sets: 3,
+      reps: '8-10',
+      rest_seconds: 90,
+      rationale: '',
+    }));
+    setSeedTemplateExercises(seeded);
+    setSelectedTemplateId('__new__');
+    setView('template-editor');
+  };
   const saveTemplate = async (data) => {
     try {
       if (!data.id) {
@@ -5010,6 +5272,7 @@ function CoachApp() {
         setTemplates(prev => prev.map(t => t.id === id ? updated : t));
       }
       setSelectedTemplateId(null);
+      setSeedTemplateExercises([]);
       setView('workouts');
     } catch (e) { alert('Failed to save template: ' + e.message); }
   };
@@ -5074,7 +5337,7 @@ function CoachApp() {
 
   const selectedClient   = clients.find(c => c.id === selectedId);
   const selectedTemplate = selectedTemplateId === '__new__'
-    ? { id:null, name:'', description:'', exercises:[] }
+    ? { id:null, name:'', description:'', exercises: seedTemplateExercises }
     : templates.find(t => t.id === selectedTemplateId);
   const selectedProgram = selectedProgramId === '__new__'
     ? { id:null, name:'', description:'', notes:'', days:[] }
@@ -5185,6 +5448,7 @@ function CoachApp() {
               onNewProgram={newProgram}
               onEditProgram={editProgram}
               onDeleteProgram={deleteProgram}
+              onBuildFromSelection={buildTemplateFromSelection}
             />
           )}
 
@@ -5193,7 +5457,7 @@ function CoachApp() {
               template={selectedTemplate}
               exercises={exercises.filter(e => !e.owner_id)}
               onSave={saveTemplate}
-              onBack={()=>{ setSelectedTemplateId(null); setView('workouts'); }}
+              onBack={()=>{ setSelectedTemplateId(null); setSeedTemplateExercises([]); setView('workouts'); }}
             />
           )}
 
