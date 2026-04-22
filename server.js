@@ -801,13 +801,15 @@ app.post('/api/client-programs', requireAnyAuth, (req, res) => {
   const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(clientId);
   if (!client) return res.status(404).json({ error: 'client not found' });
 
-  // Clients can only use programs they own as a base. Coach globals need to be assigned by the coach.
+  // Clients can run any program they're allowed to see (globals + their own).
+  // The GET /api/programs endpoint scope determines what's visible; if they
+  // can GET it, they can use it as a base. This matches coach ASSIGN behavior
+  // where the coach's library programs become the client's active plan.
   if (req.session.role === 'client' && base_program_id) {
     const baseProgram = db.prepare('SELECT owner_id FROM programs WHERE id = ?').get(base_program_id);
     if (!baseProgram) return res.status(404).json({ error: 'base program not found' });
-    if (baseProgram.owner_id !== req.session.client_id) {
-      return res.status(403).json({ error: 'clients can only run their own programs — ask coach to assign a library program' });
-    }
+    const visible = baseProgram.owner_id === null || baseProgram.owner_id === req.session.client_id;
+    if (!visible) return res.status(403).json({ error: 'forbidden' });
   }
 
   let days, planName, planDescription, planNotes;
