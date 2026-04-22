@@ -732,7 +732,7 @@ function ResendLoginButton({ clientId }) {
 /* =========================================================
    CLIENT DETAIL
    ========================================================= */
-function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onSaveMealSuggestion, onDeleteMealSuggestion, onSetStatus, onDelete, onBack }) {
+function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onToggleCheckinLock, onSaveMealSuggestion, onDeleteMealSuggestion, onSetStatus, onDelete, onBack }) {
   const [tab, setTab] = useState('timeline');
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -829,7 +829,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
       </div>
 
       {tab==='timeline'  && <TimelineTab logs={logs} client={client} mealSuggestions={mealSuggestions} onSaveMealSuggestion={onSaveMealSuggestion} onDeleteMealSuggestion={onDeleteMealSuggestion}/>}
-      {tab==='checkins'  && <CheckinsTab checkins={clientCheckins}/>}
+      {tab==='checkins'  && <CheckinsTab checkins={clientCheckins} onToggleLock={onToggleCheckinLock}/>}
       {tab==='questions' && <QuestionsTab questions={clientQuestions} onToggleResolve={onToggleResolveQuestion}/>}
       {tab==='notes'     && <NotesTab notes={clientNotes} clientId={client.id} onAdd={onAddNote} onUpdate={onUpdateNote} onDelete={onDeleteNote}/>}
       {tab==='actions'   && <ActionsTab client={client} onSetStatus={onSetStatus} onDelete={onDelete}/>}
@@ -995,7 +995,7 @@ function TimelineTab({ logs, client, mealSuggestions, onSaveMealSuggestion, onDe
 /* =========================================================
    CHECK-INS TAB
    ========================================================= */
-function CheckinsTab({ checkins }) {
+function CheckinsTab({ checkins, onToggleLock }) {
   const weeks = [0,1,2,3,4,5,6];
   const byWeek = {};
   checkins.forEach(c => byWeek[c.week_number] = c);
@@ -1004,7 +1004,7 @@ function CheckinsTab({ checkins }) {
     return (
       <div className="bg-white border border-dashed border-neutral-300 rounded p-12 text-center">
         <p className="font-display text-xl text-neutral-500">No check-ins submitted yet</p>
-        <p className="text-sm text-neutral-400 mt-1">Weekly check-ins appear here as they come in (Phase 3).</p>
+        <p className="text-sm text-neutral-400 mt-1">Weekly check-ins appear here as they come in.</p>
       </div>
     );
   }
@@ -1022,10 +1022,10 @@ function CheckinsTab({ checkins }) {
 
   return (
     <div className="bg-white border border-neutral-200 rounded overflow-hidden overflow-x-auto">
-      <table className="w-full text-sm min-w-[720px]">
+      <table className="w-full text-sm min-w-[800px]">
         <thead>
           <tr className="bg-neutral-50 border-b border-neutral-200">
-            {['Week','Weight','Step Count','Energy','Hunger','Wins / Struggles'].map(h=>(
+            {['Week','Weight','Step Count','Energy','Hunger','Wins / Struggles','Lock'].map(h=>(
               <th key={h} className="text-left px-4 py-3 font-display font-bold text-[10px] tracking-[0.12em] text-neutral-500">{h.toUpperCase()}</th>
             ))}
           </tr>
@@ -1039,7 +1039,7 @@ function CheckinsTab({ checkins }) {
             if (!c) return (
               <tr key={w} className="border-b border-neutral-100 last:border-0">
                 <td className="px-4 py-4 text-neutral-300">{label}</td>
-                <td colSpan={5} className="px-4 py-4 text-neutral-400 italic text-sm">Not submitted yet</td>
+                <td colSpan={6} className="px-4 py-4 text-neutral-400 italic text-sm">Not submitted yet</td>
               </tr>
             );
             return (
@@ -1056,6 +1056,19 @@ function CheckinsTab({ checkins }) {
                 <td className="px-4 py-4 max-w-md">
                   {c.wins && <div className="text-xs leading-relaxed"><span className="font-display font-bold tracking-[0.1em] text-emerald-700">WINS · </span>{c.wins}</div>}
                   {c.struggles && <div className="text-xs leading-relaxed mt-1"><span className="font-display font-bold tracking-[0.1em] text-brand-orange">STRUGGLES · </span>{c.struggles}</div>}
+                </td>
+                <td className="px-4 py-4">
+                  {/* Lock toggle: once locked, the client can no longer edit their check-in.
+                      Coach can still overwrite either way. */}
+                  <button onClick={()=>onToggleLock && onToggleLock(c.id, !c.is_locked)}
+                    title={c.is_locked ? 'Unlock so the client can edit again' : 'Lock so the client can no longer edit'}
+                    className={`font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded transition whitespace-nowrap ${
+                      c.is_locked
+                        ? 'bg-neutral-800 text-white hover:bg-neutral-700'
+                        : 'border border-neutral-300 text-neutral-500 hover:border-neutral-800 hover:text-neutral-800'
+                    }`}>
+                    {c.is_locked ? '🔒 LOCKED' : 'LOCK'}
+                  </button>
                 </td>
               </tr>
             );
@@ -2729,81 +2742,602 @@ function ClientLogin({ onLogin }) {
 }
 
 /* =========================================================
-   CLIENT APP — post-login landing.
+   CLIENT APP — post-login experience.
 
-   Phase 2 (this release): welcome, program week, start date, goals.
-   Interactive features (upload, check-in, questions, timeline) ship next.
+   Structure:
+     ClientRoot  → loads data, owns state, routes auth
+     ClientApp   → mini-router between 5 views: home/upload/checkin/questions/timeline
+     ClientHome  → landing with big Upload CTA + secondary actions + stats
+     ClientUploadView     → meal photo picker (camera or gallery), any past date allowed
+     ClientCheckinView    → week grid + form (editable until coach locks the row)
+     ClientQuestionsView  → post new + history of past asks
+     ClientTimelineView   → 6-week grouped view with meal logs, check-ins, collapsible coach suggestions
    ========================================================= */
-function ClientApp({ client, onLogout }) {
-  const week = weekOfProgram(client.start_date);
-  const firstName = client.name.split(/\s+/)[0] || client.name;
+
+// Shared header used across every client screen.
+// Clicking the brand mark navigates home when on a sub-view — gives the client
+// a reliable way back without hunting for a "back" link.
+function ClientHeader({ onLogout, onHome }) {
+  return (
+    <header className="bg-brand-black text-white sticky top-0 z-40">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+        <button onClick={onHome} className="flex items-center gap-2 hover:opacity-80 transition">
+          <div className="w-2.5 h-2.5 bg-brand-orange"/>
+          <span className="font-display font-bold text-xs tracking-[0.25em] hidden sm:inline">THE BUFFALO METHOD</span>
+        </button>
+        <button onClick={onLogout}
+          className="text-xs font-display font-semibold tracking-[0.12em] text-neutral-400 hover:text-white transition">
+          LOG OUT
+        </button>
+      </div>
+    </header>
+  );
+}
+
+// Small "‹ BACK" link used at the top of each sub-view.
+function BackLink({ onClick, label = 'BACK' }) {
+  return (
+    <button onClick={onClick} className="text-neutral-500 hover:text-brand-black text-xs font-display font-semibold tracking-[0.12em] transition flex items-center gap-1.5 mb-5">
+      ‹ {label}
+    </button>
+  );
+}
+
+// Given a log's date and the client's start_date, compute which program week (0-6) it belongs to.
+// Mirrors weekOfProgram but accepts any reference date instead of hardcoding TODAY.
+function weekForLogDate(logDate, startDate) {
+  const days = Math.floor((new Date(logDate + 'T12:00:00') - new Date(startDate + 'T00:00:00')) / 86400000);
+  return Math.max(0, Math.min(6, Math.floor(days / 7)));
+}
+
+/* ---------- HOME ---------- */
+function ClientHome({ client, firstName, week, mealLogs, checkins, onGo }) {
+  const lastUploadDays = daysSinceLastUpload(mealLogs);
+  const currentWeekCheckinDone = checkins.some(c => c.week_number === week);
 
   return (
-    <div className="min-h-screen">
-      {/* Header */}
-      <header className="bg-brand-black text-white">
-        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-2.5 h-2.5 bg-brand-orange"/>
-            <span className="font-display font-bold text-xs tracking-[0.25em] hidden sm:inline">THE BUFFALO METHOD</span>
+    <div className="px-4 sm:px-6 py-6">
+      <div className="mb-8">
+        <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-3">YOUR PROGRAM</div>
+        <h1 className="font-display font-bold text-4xl sm:text-5xl leading-none mb-2">Welcome,<br/>{firstName}.</h1>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-6">
+        <div className="bg-white border border-neutral-200 rounded p-3 sm:p-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[9px] sm:text-[10px] text-neutral-500 mb-1">WEEK</div>
+          <div className="font-display font-bold text-2xl sm:text-3xl leading-none">
+            {client.status==='completed' ? 'Done' : week === 0 ? 'Intro' : `${week}/6`}
           </div>
-          <button onClick={onLogout}
-            className="text-xs font-display font-semibold tracking-[0.12em] text-neutral-400 hover:text-white transition">
-            LOG OUT
+        </div>
+        <div className="bg-white border border-neutral-200 rounded p-3 sm:p-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[9px] sm:text-[10px] text-neutral-500 mb-1">UPLOADS</div>
+          <div className="font-display font-bold text-2xl sm:text-3xl leading-none">{mealLogs.length}</div>
+        </div>
+        <div className="bg-white border border-neutral-200 rounded p-3 sm:p-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[9px] sm:text-[10px] text-neutral-500 mb-1">LAST</div>
+          <div className="font-display font-bold text-2xl sm:text-3xl leading-none">
+            {lastUploadDays === Infinity ? '—' : lastUploadDays === 0 ? 'Today' : lastUploadDays + 'd'}
+          </div>
+        </div>
+      </div>
+
+      {/* PRIMARY ACTION — Upload Meals (biggest daily action per Derek's spec) */}
+      <button onClick={()=>onGo('upload')}
+        className="w-full bg-brand-orange hover:bg-brand-orange-dark text-white rounded-lg p-6 mb-3 text-left transition active:scale-[0.99]">
+        <div className="font-display font-bold tracking-[0.2em] text-[10px] text-white/80 mb-1">DAILY</div>
+        <div className="font-display font-bold text-3xl leading-none mb-2">Upload Meals</div>
+        <div className="text-white/90 text-sm">Photos of what you ate. Up to 5 per day.</div>
+      </button>
+
+      {/* SECONDARY ACTIONS */}
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <button onClick={()=>onGo('checkin')}
+          className="bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 text-left transition active:scale-[0.99]">
+          <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">WEEKLY</div>
+          <div className="font-display font-bold text-xl leading-tight mb-1">Check-in</div>
+          <div className="text-neutral-600 text-xs">
+            {currentWeekCheckinDone ? '✓ Submitted this week' : week === 0 ? 'Starts week 1' : 'Not yet this week'}
+          </div>
+        </button>
+        <button onClick={()=>onGo('questions')}
+          className="bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 text-left transition active:scale-[0.99]">
+          <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">ANYTIME</div>
+          <div className="font-display font-bold text-xl leading-tight mb-1">Ask Derek</div>
+          <div className="text-neutral-600 text-xs">Post a question</div>
+        </button>
+      </div>
+
+      <button onClick={()=>onGo('timeline')}
+        className="w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 mb-6 text-left transition active:scale-[0.99]">
+        <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">HISTORY</div>
+        <div className="font-display font-bold text-xl leading-tight mb-1">Your 6-Week Timeline</div>
+        <div className="text-neutral-600 text-sm">Uploads, check-ins, and feedback from Derek</div>
+      </button>
+
+      {client.goals && (
+        <div className="bg-white border border-neutral-200 rounded p-5 mb-6">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">YOUR GOALS</div>
+          <p className="text-neutral-800 leading-relaxed whitespace-pre-wrap text-sm">{client.goals}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- UPLOAD ---------- */
+function ClientUploadView({ onBack, onSaved }) {
+  const [date, setDate] = useState(fmtDate(TODAY));
+  const [note, setNote] = useState('');
+  const [files, setFiles] = useState([]);
+  const [previews, setPreviews] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [error, setError] = useState('');
+  const fileRef = useRef();
+
+  useEffect(() => {
+    const urls = files.map(f => URL.createObjectURL(f));
+    setPreviews(urls);
+    return () => urls.forEach(u => URL.revokeObjectURL(u));
+  }, [files]);
+
+  const handleFiles = (incoming) => {
+    const arr = Array.from(incoming);
+    setFiles(prev => [...prev, ...arr].slice(0, MAX_PHOTOS));
+  };
+  const removePhoto = (i) => setFiles(prev => prev.filter((_, idx) => idx !== i));
+
+  const submit = async () => {
+    if (files.length === 0 || submitting) return;
+    setSubmitting(true); setError('');
+    try {
+      const fd = new FormData();
+      fd.append('log_date', date);
+      fd.append('note', note.trim());
+      files.forEach(f => fd.append('photos', f));
+      const saved = await api.postForm('/api/meal-logs', fd);
+      onSaved(saved);
+      setSuccess(true);
+      setFiles([]); setNote(''); setDate(fmtDate(TODAY));
+    } catch (e) {
+      setError(e.message || 'upload failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (success) {
+    return (
+      <div className="px-4 sm:px-6 py-8">
+        <div className="bg-white border border-emerald-200 rounded-lg p-8 text-center mb-4">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-emerald-100 text-emerald-700 mb-4 text-2xl">✓</div>
+          <h2 className="font-display font-bold text-3xl leading-tight mb-2">Sent!</h2>
+          <p className="text-neutral-600 mb-6">Derek will take a look and follow up.</p>
+          <div className="flex flex-col gap-2">
+            <button onClick={()=>setSuccess(false)}
+              className="w-full bg-brand-orange hover:bg-brand-orange-dark text-white font-display font-bold tracking-[0.15em] text-sm py-3 rounded transition">
+              UPLOAD ANOTHER
+            </button>
+            <button onClick={onBack}
+              className="w-full border border-neutral-300 text-brand-black font-display font-bold tracking-[0.15em] text-sm py-3 rounded hover:bg-neutral-50 transition">
+              BACK TO HOME
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack}/>
+      <h1 className="font-display font-bold text-4xl leading-none mb-1">Upload Meals</h1>
+      <p className="text-neutral-600 text-sm mb-6">Photos of what you ate. Up to 5. Quick note if you want.</p>
+
+      <div className="bg-white border border-neutral-200 rounded-lg p-5 mb-4">
+        <div className="mb-4">
+          <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">DATE</label>
+          <input type="date" value={date} max={fmtDate(TODAY)}
+            onChange={(e)=>setDate(e.target.value)}
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition"/>
+          <p className="text-xs text-neutral-500 mt-1">Defaults to today. Pick any past date if you're catching up.</p>
+        </div>
+
+        <div className="mb-4">
+          <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">PHOTOS ({files.length} / {MAX_PHOTOS})</label>
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            {previews.map((url, i) => (
+              <div key={i} className="relative aspect-square rounded overflow-hidden border border-neutral-200">
+                <img src={url} alt={`Photo ${i+1}`} className="w-full h-full object-cover"/>
+                <button onClick={()=>removePhoto(i)}
+                  className="absolute top-1 right-1 w-7 h-7 bg-black/70 text-white rounded-full flex items-center justify-center hover:bg-black transition">×</button>
+              </div>
+            ))}
+            {files.length < MAX_PHOTOS && (
+              <button onClick={()=>fileRef.current.click()}
+                className="aspect-square border-2 border-dashed border-neutral-300 hover:border-brand-orange rounded flex flex-col items-center justify-center gap-1 text-neutral-500 hover:text-brand-orange transition">
+                <div className="text-3xl leading-none">+</div>
+                <div className="text-[10px] font-display tracking-[0.12em] font-bold">ADD PHOTO</div>
+              </button>
+            )}
+          </div>
+          {/* capture="environment" tells mobile to prefer the back camera. Without it, iOS/Android may only offer Gallery. */}
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple
+            onChange={(e)=>{ handleFiles(e.target.files); e.target.value=''; }}
+            className="hidden"/>
+        </div>
+
+        <div>
+          <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">NOTE (OPTIONAL)</label>
+          <textarea value={note} onChange={(e)=>setNote(e.target.value)} rows={3}
+            placeholder="Anything to add? e.g. 'ran out of eggs, used cheese instead'"
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition resize-none"/>
+        </div>
+      </div>
+
+      {error && <div className="text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 text-sm mb-3">{error}</div>}
+
+      <button onClick={submit} disabled={files.length === 0 || submitting}
+        className="w-full bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.15em] text-sm py-3 rounded transition">
+        {submitting ? 'UPLOADING…' : files.length === 0 ? 'ADD AT LEAST ONE PHOTO' : `UPLOAD ${files.length} PHOTO${files.length===1?'':'S'}`}
+      </button>
+    </div>
+  );
+}
+
+/* ---------- CHECK-IN ---------- */
+function ClientCheckinView({ client, checkins, onSave, onBack }) {
+  const currentWeek = weekOfProgram(client.start_date);
+  const [selectedWeek, setSelectedWeek] = useState(null);
+  const availableWeeks = [1, 2, 3, 4, 5, 6];
+
+  if (selectedWeek !== null) {
+    const existing = checkins.find(c => c.week_number === selectedWeek);
+    return <ClientCheckinForm week={selectedWeek} existing={existing} onSave={onSave} onBack={()=>setSelectedWeek(null)}/>;
+  }
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack}/>
+      <h1 className="font-display font-bold text-4xl leading-none mb-1">Check-ins</h1>
+      <p className="text-neutral-600 text-sm mb-6">One per week. Fill out what you can — skip anything you don't know.</p>
+
+      <div className="space-y-2">
+        {availableWeeks.map(w => {
+          const existing = checkins.find(c => c.week_number === w);
+          const isCurrent = w === currentWeek;
+          const isFuture  = w > currentWeek;
+          const isLocked  = existing?.is_locked;
+          return (
+            <button key={w} onClick={()=>!isFuture && setSelectedWeek(w)} disabled={isFuture}
+              className={`w-full text-left rounded-lg p-4 flex items-center gap-4 border transition ${
+                isFuture      ? 'border-neutral-200 bg-neutral-50 cursor-not-allowed opacity-60' :
+                isCurrent     ? 'border-brand-orange bg-brand-orange/5 hover:bg-brand-orange/10' :
+                                'border-neutral-200 bg-white hover:border-brand-orange'
+              }`}>
+              <div className="font-display font-bold text-3xl w-12 text-center leading-none">{w}</div>
+              <div className="flex-1 min-w-0">
+                <div className="font-display font-bold text-lg leading-tight">Week {w}</div>
+                <div className="text-sm text-neutral-600">
+                  {isLocked               ? '✓ Submitted · Locked' :
+                   existing               ? '✓ Submitted · Tap to edit' :
+                   isCurrent              ? 'Due this week' :
+                   isFuture               ? 'Not yet' :
+                                            'Not submitted'}
+                </div>
+              </div>
+              {!isFuture && <div className="text-neutral-400 flex-shrink-0">›</div>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ClientCheckinForm({ week, existing, onSave, onBack }) {
+  const [form, setForm] = useState({
+    weight_lbs:   existing?.weight_lbs ?? '',
+    steps_avg:    existing?.steps_avg ?? '',
+    energy_1_10:  existing?.energy_1_10 ?? '',
+    hunger_1_10:  existing?.hunger_1_10 ?? '',
+    wins:         existing?.wins || '',
+    struggles:    existing?.struggles || '',
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const locked = existing?.is_locked;
+
+  const submit = async () => {
+    setSubmitting(true); setError('');
+    try {
+      await onSave({
+        week_number: week,
+        weight_lbs:  form.weight_lbs === '' ? null : Number(form.weight_lbs),
+        steps_avg:   form.steps_avg  === '' ? null : Number(form.steps_avg),
+        energy_1_10: form.energy_1_10 === '' ? null : Number(form.energy_1_10),
+        hunger_1_10: form.hunger_1_10 === '' ? null : Number(form.hunger_1_10),
+        wins:        form.wins,
+        struggles:   form.struggles,
+      });
+      onBack();
+    } catch (e) {
+      setError(e.message || 'save failed');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack} label="BACK TO CHECK-INS"/>
+      <h1 className="font-display font-bold text-4xl leading-none mb-1">Week {week}</h1>
+      <p className="text-neutral-600 text-sm mb-6">
+        {locked ? 'This check-in is locked. Text Derek if you need to update it.' : "Fill out what you can. Skip anything you don't know."}
+      </p>
+
+      <fieldset disabled={locked || submitting} className="space-y-4 bg-white border border-neutral-200 rounded-lg p-5 mb-4 disabled:opacity-75">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">WEIGHT (LBS)</label>
+            <input type="number" inputMode="decimal" step="0.1" value={form.weight_lbs}
+              onChange={(e)=>setForm({...form, weight_lbs:e.target.value})} placeholder="e.g. 180"
+              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition disabled:bg-neutral-50"/>
+          </div>
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">AVG STEPS</label>
+            <input type="number" inputMode="numeric" value={form.steps_avg}
+              onChange={(e)=>setForm({...form, steps_avg:e.target.value})} placeholder="e.g. 8500"
+              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition disabled:bg-neutral-50"/>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">ENERGY (1–10)</label>
+            <input type="number" inputMode="numeric" min="1" max="10" value={form.energy_1_10}
+              onChange={(e)=>setForm({...form, energy_1_10:e.target.value})}
+              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition disabled:bg-neutral-50"/>
+          </div>
+          <div>
+            <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">HUNGER (1–10)</label>
+            <input type="number" inputMode="numeric" min="1" max="10" value={form.hunger_1_10}
+              onChange={(e)=>setForm({...form, hunger_1_10:e.target.value})}
+              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition disabled:bg-neutral-50"/>
+          </div>
+        </div>
+        <div>
+          <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">WINS</label>
+          <textarea value={form.wins} onChange={(e)=>setForm({...form, wins:e.target.value})} rows={3}
+            placeholder="What went well this week?"
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition resize-none disabled:bg-neutral-50"/>
+        </div>
+        <div>
+          <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1.5">STRUGGLES</label>
+          <textarea value={form.struggles} onChange={(e)=>setForm({...form, struggles:e.target.value})} rows={3}
+            placeholder="What was hard? What slipped?"
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition resize-none disabled:bg-neutral-50"/>
+        </div>
+      </fieldset>
+
+      {error && <div className="text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 text-sm mb-3">{error}</div>}
+
+      {!locked && (
+        <button onClick={submit} disabled={submitting}
+          className="w-full bg-brand-orange hover:bg-brand-orange-dark disabled:opacity-60 disabled:cursor-wait text-white font-display font-bold tracking-[0.15em] text-sm py-3 rounded transition">
+          {submitting ? 'SAVING…' : existing ? 'UPDATE CHECK-IN' : 'SUBMIT CHECK-IN'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ---------- QUESTIONS ---------- */
+function ClientQuestionsView({ questions, onPost, onBack }) {
+  const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    if (!message.trim() || submitting) return;
+    setSubmitting(true); setError('');
+    try {
+      await onPost(message.trim());
+      setMessage('');
+    } catch (e) {
+      setError(e.message || 'send failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack}/>
+      <h1 className="font-display font-bold text-4xl leading-none mb-1">Ask Derek</h1>
+      <p className="text-neutral-600 text-sm mb-6">Post anything. Derek replies via text or DM — this just logs it so nothing slips.</p>
+
+      <div className="bg-white border border-neutral-200 rounded-lg p-5 mb-4">
+        <textarea value={message} onChange={(e)=>setMessage(e.target.value)} rows={4}
+          placeholder="Travel coming up, a new supplement, dealing with a plateau, anything..."
+          className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange focus:outline-none transition resize-none mb-3"/>
+        {error && <div className="text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 text-sm mb-3">{error}</div>}
+        <button onClick={submit} disabled={!message.trim() || submitting}
+          className="w-full bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.15em] text-sm py-3 rounded transition">
+          {submitting ? 'SENDING…' : 'POST QUESTION'}
+        </button>
+      </div>
+
+      {questions.length > 0 ? (
+        <div>
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-3">YOUR QUESTIONS</div>
+          <div className="space-y-2">
+            {questions.map(q => (
+              <div key={q.id} className={`bg-white border rounded-lg p-4 ${q.is_resolved ? 'border-emerald-200' : 'border-neutral-200'}`}>
+                <div className="flex items-start justify-between gap-3 mb-1">
+                  <span className={`font-display font-bold tracking-[0.12em] text-[10px] px-2 py-0.5 rounded uppercase ${q.is_resolved ? 'bg-emerald-100 text-emerald-900' : 'bg-brand-orange/10 text-brand-orange'}`}>
+                    {q.is_resolved ? '✓ Answered' : 'Open'}
+                  </span>
+                  <span className="text-xs text-neutral-400 font-display tracking-[0.1em]">{displayDate(q.created_at)}</span>
+                </div>
+                <p className={`leading-relaxed text-sm ${q.is_resolved ? 'text-neutral-600' : 'text-neutral-900'}`}>{q.message}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="text-neutral-500 text-sm text-center py-8">No questions yet.</p>
+      )}
+    </div>
+  );
+}
+
+/* ---------- TIMELINE ---------- */
+function ClientTimelineView({ client, mealLogs, checkins, mealSuggestions, onBack }) {
+  // Bucket logs + check-ins by program week (0-6)
+  const byWeek = {};
+  for (let w = 0; w <= 6; w++) byWeek[w] = { logs: [], checkin: null };
+  mealLogs.forEach(log => {
+    const w = weekForLogDate(log.log_date, client.start_date);
+    byWeek[w].logs.push(log);
+  });
+  checkins.forEach(c => { if (byWeek[c.week_number]) byWeek[c.week_number].checkin = c; });
+
+  const suggForLog = (logId) => mealSuggestions.find(s => s.meal_log_id === logId);
+
+  // Most recent weeks at the top — mobile natural.
+  const weeksWithContent = Object.keys(byWeek).map(Number)
+    .filter(w => byWeek[w].logs.length > 0 || byWeek[w].checkin)
+    .sort((a, b) => b - a);
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack}/>
+      <h1 className="font-display font-bold text-4xl leading-none mb-1">Your Timeline</h1>
+      <p className="text-neutral-600 text-sm mb-6">Meals, check-ins, and feedback from Derek, grouped by week.</p>
+
+      {weeksWithContent.length === 0 ? (
+        <div className="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center">
+          <p className="text-neutral-500 text-sm">Nothing here yet. Upload your first meal to get started.</p>
+        </div>
+      ) : (
+        <div className="space-y-8">
+          {weeksWithContent.map(w => {
+            const { logs, checkin } = byWeek[w];
+            const sortedLogs = [...logs].sort((a, b) => b.log_date.localeCompare(a.log_date));
+            return (
+              <div key={w}>
+                <div className="flex items-baseline gap-3 mb-3">
+                  <div className="font-display font-bold text-5xl leading-none">{w === 0 ? 'Wk 0' : 'Wk ' + w}</div>
+                  <div className="text-sm text-neutral-500">
+                    {logs.length} {logs.length===1?'upload':'uploads'}
+                    {checkin ? ' · check-in done' : ''}
+                  </div>
+                </div>
+
+                {checkin && (
+                  <div className="bg-white border border-neutral-200 rounded-lg p-4 mb-3">
+                    <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">
+                      CHECK-IN{checkin.is_locked ? ' · LOCKED' : ''}
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-2 text-sm">
+                      <div><span className="text-neutral-500">Weight:</span> {checkin.weight_lbs ? checkin.weight_lbs + ' lbs' : '—'}</div>
+                      <div><span className="text-neutral-500">Steps:</span> {checkin.steps_avg ?? '—'}</div>
+                      <div><span className="text-neutral-500">Energy:</span> {checkin.energy_1_10 ? checkin.energy_1_10 + '/10' : '—'}</div>
+                      <div><span className="text-neutral-500">Hunger:</span> {checkin.hunger_1_10 ? checkin.hunger_1_10 + '/10' : '—'}</div>
+                    </div>
+                    {checkin.wins && <div className="mb-1 text-sm"><span className="font-display font-bold text-[10px] tracking-[0.12em] text-emerald-700">WINS</span> — {checkin.wins}</div>}
+                    {checkin.struggles && <div className="text-sm"><span className="font-display font-bold text-[10px] tracking-[0.12em] text-brand-orange">STRUGGLES</span> — {checkin.struggles}</div>}
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  {sortedLogs.map(log => (
+                    <ClientTimelineLog key={log.id} log={log} clientId={client.id} suggestion={suggForLog(log.id)}/>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientTimelineLog({ log, clientId, suggestion }) {
+  const [showSuggestion, setShowSuggestion] = useState(false);
+  const photos = Array.isArray(log.photos) ? log.photos : [];
+  return (
+    <div className="bg-white border border-neutral-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-display font-bold text-sm leading-none">{displayDate(log.log_date)}</div>
+        <div className="text-xs text-neutral-400 font-display tracking-[0.1em]">{photos.length} {photos.length===1?'photo':'photos'}</div>
+      </div>
+      <div className="grid grid-cols-3 gap-1.5 mb-2">
+        {photos.map((p, i) => (
+          <img key={i} src={photoURL(clientId, log.log_date, p)} alt=""
+            className="w-full aspect-square object-cover rounded border border-neutral-200"/>
+        ))}
+      </div>
+      {log.note && <p className="text-sm text-neutral-700 italic mt-2">"{log.note}"</p>}
+
+      {suggestion && (
+        <div className="mt-3 border-t border-neutral-100 pt-3">
+          <button onClick={()=>setShowSuggestion(!showSuggestion)}
+            className="w-full text-left flex items-center gap-1.5 text-[11px] font-display font-bold tracking-[0.12em] text-brand-orange hover:text-brand-orange-dark transition">
+            <span>{showSuggestion ? '▾' : '▸'}</span>
+            <span>COACH REPLY · {suggestion.meals.length} {suggestion.meals.length===1?'SUGGESTION':'SUGGESTIONS'}</span>
           </button>
-        </div>
-      </header>
-
-      {/* Body */}
-      <div className="max-w-3xl mx-auto px-6 py-10">
-        <div className="mb-10">
-          <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-3">YOUR PROGRAM</div>
-          <h1 className="font-display font-bold text-5xl leading-none mb-2">Welcome,<br/>{firstName}.</h1>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
-          <div className="bg-white border border-neutral-200 rounded p-5">
-            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">PROGRAM WEEK</div>
-            <div className="font-display font-bold text-3xl leading-none">
-              {client.status==='completed' ? 'Complete' : week === 0 ? 'Onboarding' : `${week} / 6`}
+          {showSuggestion && (
+            <div className="mt-3 space-y-2">
+              {suggestion.message && <p className="text-sm text-neutral-800 leading-relaxed italic">"{suggestion.message}"</p>}
+              {suggestion.meals.map(normalizeMeal).map((m, i) => (
+                <div key={i} className="bg-emerald-50 border border-emerald-100 rounded p-3">
+                  <div className="font-display font-bold text-sm leading-tight mb-1.5">{m.name}</div>
+                  <div className="flex flex-wrap gap-1">
+                    {m.proteins.map(v => <MealPill key={'p-'+v} type="protein" value={v}/>)}
+                    {m.carbs.map(v    => <MealPill key={'c-'+v} type="carb"    value={v}/>)}
+                    {m.fats.map(v     => <MealPill key={'f-'+v} type="fat"     value={v}/>)}
+                  </div>
+                </div>
+              ))}
             </div>
-          </div>
-          <div className="bg-white border border-neutral-200 rounded p-5">
-            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">START DATE</div>
-            <div className="font-display font-bold text-3xl leading-none">{displayDate(client.start_date)}</div>
-          </div>
-          <div className="bg-white border border-neutral-200 rounded p-5">
-            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">STATUS</div>
-            <div className="font-display font-bold text-3xl leading-none capitalize">{client.status}</div>
-          </div>
+          )}
         </div>
+      )}
+    </div>
+  );
+}
 
-        {client.goals && (
-          <div className="bg-white border border-neutral-200 rounded p-6 mb-6">
-            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">YOUR GOALS</div>
-            <p className="text-neutral-800 leading-relaxed whitespace-pre-wrap">{client.goals}</p>
-          </div>
-        )}
+/* ---------- ROUTER ---------- */
+function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, onAddMealLog, onSaveCheckin, onPostQuestion, onLogout }) {
+  const [view, setView] = useState('home');
+  const goHome = () => setView('home');
+  const firstName = client.name.split(/\s+/)[0] || client.name;
+  const week = weekOfProgram(client.start_date);
 
-        <div className="bg-brand-orange/5 border border-brand-orange/30 rounded p-6 mb-6">
-          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange mb-2">COMING NEXT</div>
-          <div className="text-neutral-800 leading-relaxed">
-            <p className="mb-2">Meal photo uploads, weekly check-ins, and your personal timeline are rolling out soon. I'll message you the moment they're live.</p>
-            <p className="text-sm text-neutral-600">Until then, keep doing what we talked about — and text me directly if anything comes up.</p>
-          </div>
-        </div>
-
-        <p className="text-neutral-500 text-sm">— Derek</p>
+  return (
+    <div className="min-h-screen bg-neutral-50">
+      <ClientHeader onLogout={onLogout} onHome={goHome}/>
+      <div className="max-w-3xl mx-auto">
+        {view === 'home'      && <ClientHome client={client} firstName={firstName} week={week} mealLogs={mealLogs} checkins={checkins} onGo={setView}/>}
+        {view === 'upload'    && <ClientUploadView    onBack={goHome} onSaved={onAddMealLog}/>}
+        {view === 'checkin'   && <ClientCheckinView   client={client} checkins={checkins} onSave={onSaveCheckin} onBack={goHome}/>}
+        {view === 'questions' && <ClientQuestionsView questions={questions} onPost={onPostQuestion} onBack={goHome}/>}
+        {view === 'timeline'  && <ClientTimelineView  client={client} mealLogs={mealLogs} checkins={checkins} mealSuggestions={mealSuggestions} onBack={goHome}/>}
       </div>
     </div>
   );
 }
 
 /* =========================================================
-   CLIENT ROOT — session check + login/app routing for the /client path.
+   CLIENT ROOT — session check + data loading for the /client path.
    ========================================================= */
 function ClientRoot() {
   const [state, setState] = useState({ loading: true, client: null });
+  const [mealLogs, setMealLogs]               = useState([]);
+  const [checkins, setCheckins]               = useState([]);
+  const [questions, setQuestions]             = useState([]);
+  const [mealSuggestions, setMealSuggestions] = useState([]);
 
   useEffect(() => {
     api.get('/api/me')
@@ -2814,9 +3348,45 @@ function ClientRoot() {
       .catch(() => setState({ loading: false, client: null }));
   }, []);
 
+  const loadAll = useCallback(async () => {
+    try {
+      const [logs, cks, qs, sugs] = await Promise.all([
+        api.get('/api/meal-logs'),
+        api.get('/api/checkins'),
+        api.get('/api/questions'),
+        api.get('/api/meal-suggestions'),
+      ]);
+      setMealLogs(logs); setCheckins(cks); setQuestions(qs); setMealSuggestions(sugs);
+    } catch (e) {
+      console.error('[client] load failed:', e);
+    }
+  }, []);
+
+  useEffect(() => { if (state.client) loadAll(); }, [state.client, loadAll]);
+
   const logout = async () => {
     try { await api.post('/api/logout'); } catch {}
     setState({ loading: false, client: null });
+    setMealLogs([]); setCheckins([]); setQuestions([]); setMealSuggestions([]);
+  };
+
+  // ---- Write handlers — optimistic state updates ----
+  const addMealLog = (saved) => setMealLogs(prev => [saved, ...prev]);
+
+  const saveCheckin = async (data) => {
+    // Let errors bubble so the form can show them (e.g. "this check-in is locked")
+    const saved = await api.post('/api/checkins', data);
+    setCheckins(prev => {
+      const others = prev.filter(c => c.week_number !== saved.week_number);
+      return [...others, saved];
+    });
+    return saved;
+  };
+
+  const postQuestion = async (message) => {
+    const saved = await api.post('/api/questions', { message });
+    setQuestions(prev => [saved, ...prev]);
+    return saved;
   };
 
   if (state.loading) {
@@ -2829,7 +3399,19 @@ function ClientRoot() {
   if (!state.client) {
     return <ClientLogin onLogin={(client)=>setState({ loading: false, client })}/>;
   }
-  return <ClientApp client={state.client} onLogout={logout}/>;
+  return (
+    <ClientApp
+      client={state.client}
+      mealLogs={mealLogs}
+      checkins={checkins}
+      questions={questions}
+      mealSuggestions={mealSuggestions}
+      onAddMealLog={addMealLog}
+      onSaveCheckin={saveCheckin}
+      onPostQuestion={postQuestion}
+      onLogout={logout}
+    />
+  );
 }
 
 /* =========================================================
@@ -2974,6 +3556,14 @@ function CoachApp() {
     // Navigate back to list — the detail view's client just went away
     setView('list');
     setSelectedId(null);
+  };
+
+  // Lock/unlock a check-in — once locked, the client can no longer edit it.
+  const toggleCheckinLock = async (id, isLocked) => {
+    try {
+      const updated = await api.patch('/api/checkins/' + id + '/lock', { is_locked: isLocked });
+      setCheckins(prev => prev.map(c => c.id === id ? updated : c));
+    } catch (e) { alert('Failed to toggle check-in lock: ' + e.message); }
   };
 
   // ---- Leads ----
@@ -3195,6 +3785,7 @@ function CoachApp() {
               onUpdateNote={updateNote}
               onDeleteNote={deleteNote}
               onToggleResolveQuestion={toggleResolveQuestion}
+              onToggleCheckinLock={toggleCheckinLock}
               onSaveMealSuggestion={saveMealSuggestion}
               onDeleteMealSuggestion={deleteMealSuggestion}
               onSetStatus={setClientStatus}
