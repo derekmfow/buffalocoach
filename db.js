@@ -131,6 +131,26 @@ CREATE TABLE IF NOT EXISTS leads (
   FOREIGN KEY (converted_to_client_id) REFERENCES clients(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status_created ON leads(status, created_at DESC);
+
+-- A client_program is a SNAPSHOT of a library program, assigned to one client.
+-- The snapshot is intentional: if the coach edits the master library program,
+-- clients already mid-program don't get their workouts yanked around.
+-- Each client has at most one active program at a time (UNIQUE client_id).
+-- base_program_id is just a reference — nullable / SET NULL if the base is deleted.
+CREATE TABLE IF NOT EXISTS client_programs (
+  id                TEXT PRIMARY KEY,
+  client_id         TEXT NOT NULL UNIQUE,
+  base_program_id   TEXT,
+  name              TEXT NOT NULL,
+  description       TEXT DEFAULT '',
+  notes             TEXT DEFAULT '',           -- program-level coaching rationale (snapshotted from base)
+  coach_note        TEXT DEFAULT '',           -- coach note specific to this client ("run 4 weeks then switch")
+  days              TEXT NOT NULL,             -- JSON: [{label, exercises: [{exercise_id, sets, reps, rest_seconds, rationale}]}]
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  FOREIGN KEY (client_id)       REFERENCES clients(id)  ON DELETE CASCADE,
+  FOREIGN KEY (base_program_id) REFERENCES programs(id) ON DELETE SET NULL
+);
 `);
 
 // ============================================================
