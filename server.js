@@ -626,6 +626,163 @@ app.delete('/api/programs/:id', requireCoach, (req, res) => {
 });
 
 // ============================================================
+// CLIENT PROGRAMS — a snapshot of a library program assigned to one client.
+//
+// Read: coach can see any client's; client can see own only.
+// Create/Replace: coach only. Copying a library program makes the snapshot.
+// Full edit (PATCH): coach only — sets/reps/rationale overrides, coach notes.
+// Narrow edit (swap-exercise): client OR coach — lets the client personalize
+//   without granting write access to coach-authored fields.
+// Delete: coach only. UNIQUE(client_id) enforces one program per client.
+// ============================================================
+
+// Build the initial `days` snapshot from a base program id. Resolves each
+// template into its full exercise rows so the client_program is fully
+// self-contained and unaffected by later library edits.
+function snapshotProgramDays(baseProgramId) {
+  const program = db.prepare('SELECT * FROM programs WHERE id = ?').get(baseProgramId);
+  if (!program) throw new Error('base program not found');
+  const programDays = JSON.parse(program.days); // [{template_id, label}]
+  return programDays.map(d => {
+    const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(d.template_id);
+    if (!tmpl) return { label: d.label, exercises: [] };
+    const exercises = JSON.parse(tmpl.exercises || '[]')
+      .sort((a, b) => (a.order || 0) - (b.order || 0))
+      .map(e => ({
+        exercise_id:  e.exercise_id,
+        sets:         e.sets,
+        reps:         e.reps,
+        rest_seconds: e.rest_seconds,
+        rationale:    e.rationale || '',
+      }));
+    return { label: d.label, exercises };
+  });
+}
+
+// GET — scoped: client sees own only, coach sees any (filter via ?client_id=)
+// or all (no query string → returns array of every client's program).
+app.get('/api/client-programs', requireAnyAuth, (req, res) => {
+  if (req.session.role === 'coach') {
+    const clientId = req.query.client_id;
+    if (clientId) {
+      const row = db.prepare('SELECT * FROM client_programs WHERE client_id = ?').get(clientId);
+      return res.json(row ? parseJSONField(row, 'days') : null);
+    }
+    // No filter → full list, one per assigned client.
+    const rows = db.prepare('SELECT * FROM client_programs ORDER BY updated_at DESC').all();
+    return res.json(parseJSONRows(rows, 'days'));
+  }
+  // Client: own only. Returns null if unassigned.
+  const row = db.prepare('SELECT * FROM client_programs WHERE client_id = ?').get(req.session.client_id);
+  res.json(row ? parseJSONField(row, 'days') : null);
+});
+
+// POST — assign (or replace) a library program to a client. Coach only.
+// If a program is already assigned, it's REPLACED — the old snapshot (and any
+// client swaps) is discarded. Client is warned on the frontend first.
+app.post('/api/client-programs', requireCoach, (req, res) => {
+  const { client_id, base_program_id, coach_note } = req.body;
+  if (!client_id || !base_program_id) return res.status(400).json({ error: 'client_id and base_program_id required' });
+
+  const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(client_id);
+  if (!client) return res.status(404).json({ error: 'client not found' });
+
+  const baseProgram = db.prepare('SELECT * FROM programs WHERE id = ?').get(base_program_id);
+  if (!baseProgram) return res.status(404).json({ error: 'base program not found' });
+
+  let days;
+  try { days = snapshotProgramDays(base_program_id); }
+  catch (e) { return res.status(500).json({ error: e.message }); }
+
+  const nowIso = new Date().toISOString();
+
+  // Replace existing (UNIQUE on client_id). Remove first so we don't conflict.
+  db.prepare('DELETE FROM client_programs WHERE client_id = ?').run(client_id);
+
+  const id = uid('cp');
+  db.prepare(
+    `INSERT INTO client_programs (id, client_id, base_program_id, name, description, notes, coach_note, days, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id, client_id, base_program_id,
+    baseProgram.name,
+    baseProgram.description || '',
+    baseProgram.notes || '',
+    (coach_note || '').trim(),
+    JSON.stringify(days),
+    nowIso, nowIso,
+  );
+
+  const row = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(id);
+  res.json(parseJSONField(row, 'days'));
+});
+
+// PATCH — full edit. Coach only. Used for overriding sets/reps/rationale,
+// renaming, adding/editing coach_note, or replacing the full days array.
+app.patch('/api/client-programs/:id', requireCoach, (req, res) => {
+  const existing = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const { name, description, notes, coach_note, days } = req.body;
+  const fields = [], values = [];
+  if (name        !== undefined) { fields.push('name = ?');        values.push(name.trim()); }
+  if (description !== undefined) { fields.push('description = ?'); values.push((description || '').trim()); }
+  if (notes       !== undefined) { fields.push('notes = ?');       values.push((notes || '').trim()); }
+  if (coach_note  !== undefined) { fields.push('coach_note = ?');  values.push((coach_note || '').trim()); }
+  if (days        !== undefined) {
+    if (!Array.isArray(days)) return res.status(400).json({ error: 'days must be an array' });
+    fields.push('days = ?'); values.push(JSON.stringify(days));
+  }
+  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+  fields.push('updated_at = ?'); values.push(new Date().toISOString());
+  values.push(req.params.id);
+
+  db.prepare(`UPDATE client_programs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const row = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(req.params.id);
+  res.json(parseJSONField(row, 'days'));
+});
+
+// POST /swap-exercise — narrow edit. Client (own) OR coach. Changes exactly
+// one exercise_id at (day_index, exercise_index). Everything else (sets/reps/
+// rationale) stays as the coach set it. This is the endpoint clients use to
+// personalize their assigned program without touching coach-authored fields.
+app.post('/api/client-programs/:id/swap-exercise', requireAnyAuth, (req, res) => {
+  const row = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+
+  // Client can only swap on their own program
+  if (req.session.role === 'client' && row.client_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const { day_index, exercise_index, new_exercise_id } = req.body;
+  if (!Number.isInteger(day_index) || !Number.isInteger(exercise_index) || !new_exercise_id) {
+    return res.status(400).json({ error: 'day_index, exercise_index, new_exercise_id required' });
+  }
+
+  const newEx = db.prepare('SELECT id FROM exercises WHERE id = ?').get(new_exercise_id);
+  if (!newEx) return res.status(404).json({ error: 'exercise not found' });
+
+  const days = JSON.parse(row.days);
+  if (!days[day_index] || !days[day_index].exercises[exercise_index]) {
+    return res.status(400).json({ error: 'day_index / exercise_index out of range' });
+  }
+  days[day_index].exercises[exercise_index].exercise_id = new_exercise_id;
+
+  const nowIso = new Date().toISOString();
+  db.prepare('UPDATE client_programs SET days = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(days), nowIso, req.params.id);
+
+  const updated = db.prepare('SELECT * FROM client_programs WHERE id = ?').get(req.params.id);
+  res.json(parseJSONField(updated, 'days'));
+});
+
+app.delete('/api/client-programs/:id', requireCoach, (req, res) => {
+  db.prepare('DELETE FROM client_programs WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ============================================================
 // MEAL SUGGESTIONS (coach writes; both can read their own scope)
 // ============================================================
 app.get('/api/meal-suggestions', requireAnyAuth, (req, res) => {
