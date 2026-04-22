@@ -1106,8 +1106,22 @@ app.post('/api/backup/run', requireCoach, async (req, res) => {
   }
 });
 
-// Serve the React app and its static assets
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve the React app and its static assets.
+//
+// setHeaders hook fixes a few things express.static doesn't handle out of the box:
+//   - .webmanifest needs application/manifest+json so browsers accept the PWA manifest
+//   - sw.js should never be cached by the browser itself, otherwise a stale SW sticks
+//     around after deploys. The SW handles its own update lifecycle internally.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.webmanifest')) {
+      res.setHeader('Content-Type', 'application/manifest+json');
+    }
+    if (filePath.endsWith('/sw.js') || filePath.endsWith('\\sw.js')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
 
 app.get(/^(?!\/api\/|\/uploads\/).+/, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
