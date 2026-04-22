@@ -98,7 +98,9 @@ CREATE TABLE IF NOT EXISTS templates (
   name         TEXT NOT NULL,
   description  TEXT DEFAULT '',
   exercises    TEXT NOT NULL,        -- JSON array: [{exercise_id,order,sets,reps,rest_seconds,rationale}]
-  created_at   TEXT NOT NULL
+  owner_id     TEXT,                  -- NULL = global (coach's library). client_id = private to that client.
+  created_at   TEXT NOT NULL,
+  FOREIGN KEY (owner_id) REFERENCES clients(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS programs (
@@ -107,7 +109,9 @@ CREATE TABLE IF NOT EXISTS programs (
   description  TEXT DEFAULT '',
   notes        TEXT DEFAULT '',
   days         TEXT NOT NULL,        -- JSON array: [{template_id, label}]
-  created_at   TEXT NOT NULL
+  owner_id     TEXT,                  -- NULL = global (coach's library). client_id = private to that client.
+  created_at   TEXT NOT NULL,
+  FOREIGN KEY (owner_id) REFERENCES clients(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS meal_suggestions (
@@ -171,9 +175,17 @@ CREATE TABLE IF NOT EXISTS client_programs (
   const exerciseCols = db.prepare("PRAGMA table_info(exercises)").all().map(c => c.name);
   if (!exerciseCols.includes('owner_id')) {
     console.log('[db] Migration: adding owner_id column to exercises');
-    // Can't add FK constraint via ALTER in SQLite, but the column alone is enough —
-    // referential integrity for owner_id is enforced in application code.
     db.exec('ALTER TABLE exercises ADD COLUMN owner_id TEXT');
+  }
+  const templateCols = db.prepare("PRAGMA table_info(templates)").all().map(c => c.name);
+  if (!templateCols.includes('owner_id')) {
+    console.log('[db] Migration: adding owner_id column to templates');
+    db.exec('ALTER TABLE templates ADD COLUMN owner_id TEXT');
+  }
+  const programCols = db.prepare("PRAGMA table_info(programs)").all().map(c => c.name);
+  if (!programCols.includes('owner_id')) {
+    console.log('[db] Migration: adding owner_id column to programs');
+    db.exec('ALTER TABLE programs ADD COLUMN owner_id TEXT');
   }
 })();
 
