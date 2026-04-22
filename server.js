@@ -23,6 +23,7 @@ const bcrypt = require('bcryptjs');
 
 const db = require('./db');
 const { runBackup, startScheduler } = require('./backup');
+const { sendEmail, isEmailConfigured } = require('./email');
 
 // ============================================================
 // CONFIG
@@ -33,6 +34,10 @@ const UPLOAD_ROOT    = process.env.UPLOAD_ROOT || path.join(__dirname, 'data', '
 const SESSIONS_PATH  = process.env.SESSIONS_PATH || path.join(__dirname, 'data', 'sessions');
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const ADMIN_PIN      = process.env.ADMIN_PIN;
+
+// Public base URL — used to build the client login link in welcome emails.
+// Defaults to the Render URL, but override via APP_URL env var for custom domains.
+const APP_URL        = (process.env.APP_URL || 'https://buffalocoach.onrender.com').replace(/\/$/, '');
 
 if (!SESSION_SECRET) {
   console.error('[fatal] SESSION_SECRET env var not set. Refusing to start.');
@@ -155,6 +160,94 @@ app.get('/api/me', (req, res) => {
 });
 
 // ============================================================
+// WELCOME EMAIL HELPER
+//
+// Built as a helper so POST /api/clients and the "resend welcome"
+// endpoint share one source of truth for the email content.
+//
+// Returns { sent: bool, error: string|null }. Never throws — callers
+// should treat email as best-effort: if it fails, the client record
+// still exists and the coach can fall back to manual delivery.
+// ============================================================
+async function sendWelcomeEmail(client, plainPin) {
+  if (!isEmailConfigured()) {
+    return { sent: false, error: 'email not configured on this server' };
+  }
+
+  const loginUrl = `${APP_URL}/client`;
+  const firstName = client.name.split(/\s+/)[0] || 'there';
+
+  const text = [
+    `Hey ${firstName},`,
+    ``,
+    `You're set up in the Buffalo Method coaching app. Here's how to log in:`,
+    ``,
+    `  ${loginUrl}`,
+    `  Email: ${client.email}`,
+    `  PIN:   ${plainPin}`,
+    ``,
+    `Your 6-week program starts ${client.start_date}.`,
+    ``,
+    `Right now the app is set up so you can log in and see your start date and program week. Meal photo uploads and weekly check-ins are rolling out next — I'll let you know the minute they're live. Until then, keep doing what we talked about.`,
+    ``,
+    `Save that PIN somewhere. If you lose it, text me and I'll reset it.`,
+    ``,
+    `— Derek`,
+  ].join('\n');
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1A1A1A; line-height: 1.6;">
+      <div style="border-left: 4px solid #E8611A; padding-left: 16px; margin-bottom: 24px;">
+        <div style="font-size: 11px; letter-spacing: 0.25em; font-weight: 700; color: #E8611A; text-transform: uppercase;">The Buffalo Method</div>
+        <div style="font-size: 22px; font-weight: 700; margin-top: 4px;">You're in.</div>
+      </div>
+
+      <p>Hey ${escapeHtml(firstName)},</p>
+      <p>You're set up in the coaching app. Here's how to log in:</p>
+
+      <div style="background: #F5F1EA; border: 1px solid #E5DFD4; border-radius: 6px; padding: 16px; margin: 20px 0;">
+        <div style="font-size: 11px; letter-spacing: 0.15em; font-weight: 700; color: #6b6b6b; text-transform: uppercase; margin-bottom: 10px;">Your login</div>
+        <div style="margin-bottom: 6px;"><strong>URL:</strong> <a href="${loginUrl}" style="color: #E8611A; text-decoration: none;">${loginUrl}</a></div>
+        <div style="margin-bottom: 6px;"><strong>Email:</strong> ${escapeHtml(client.email)}</div>
+        <div><strong>PIN:</strong> <span style="font-family: monospace; font-size: 18px; letter-spacing: 4px; font-weight: 700;">${escapeHtml(plainPin)}</span></div>
+      </div>
+
+      <p>Your 6-week program starts <strong>${escapeHtml(client.start_date)}</strong>.</p>
+
+      <p>Right now the app is set up so you can log in and see your start date and program week. Meal photo uploads and weekly check-ins are rolling out next — I'll let you know the minute they're live. Until then, keep doing what we talked about.</p>
+
+      <p style="color: #6b6b6b; font-size: 14px;">Save that PIN somewhere. If you lose it, text me and I'll reset it.</p>
+
+      <p style="margin-top: 32px;">— Derek</p>
+    </div>
+  `;
+
+  try {
+    await sendEmail({
+      to: client.email,
+      subject: `Welcome to coaching — your login details`,
+      text,
+      html,
+    });
+    return { sent: true, error: null };
+  } catch (e) {
+    console.error('[welcome-email] failed for', client.email, ':', e.message);
+    return { sent: false, error: e.message };
+  }
+}
+
+// Minimal HTML-entity escape so user-supplied fields (name, email) can't
+// break out into markup in the welcome email body.
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ============================================================
 // CLIENTS (coach only for list/create; client can read own)
 // ============================================================
 app.get('/api/clients', requireCoach, (req, res) => {
@@ -162,7 +255,7 @@ app.get('/api/clients', requireCoach, (req, res) => {
   res.json(stripPinHashMany(rows));
 });
 
-app.post('/api/clients', requireCoach, (req, res) => {
+app.post('/api/clients', requireCoach, async (req, res) => {
   const { name, email, pin, start_date, goals } = req.body;
   if (!name || !email || !pin || !start_date) return res.status(400).json({ error: 'name, email, pin, start_date required' });
   if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: 'pin must be 4 digits' });
@@ -177,7 +270,37 @@ app.post('/api/clients', requireCoach, (req, res) => {
   ).run(id, name.trim(), email.trim(), pin_hash, start_date, 'active', (goals || '').trim(), today());
 
   const row = db.prepare('SELECT * FROM clients WHERE id = ?').get(id);
-  res.json(stripPinHash(row));
+
+  // Best-effort welcome email. Always returns, even on failure.
+  const emailResult = await sendWelcomeEmail(row, pin);
+
+  res.json({
+    client:      stripPinHash(row),
+    email_sent:  emailResult.sent,
+    email_error: emailResult.error,
+  });
+});
+
+// Resend welcome email. Generates a NEW PIN (invalidating the previous one)
+// so this also works as "reset PIN" — useful if the first email never arrived
+// or the client lost their PIN. Returns the new PIN to the coach so there's
+// a fallback if the email fails.
+app.post('/api/clients/:id/resend-welcome', requireCoach, async (req, res) => {
+  const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const newPin = String(Math.floor(1000 + Math.random() * 9000));
+  const newHash = bcrypt.hashSync(newPin, 10);
+  db.prepare('UPDATE clients SET pin_hash = ? WHERE id = ?').run(newHash, req.params.id);
+
+  const emailResult = await sendWelcomeEmail(existing, newPin);
+
+  res.json({
+    ok:          true,
+    new_pin:     newPin,               // surface to coach for manual fallback
+    email_sent:  emailResult.sent,
+    email_error: emailResult.error,
+  });
 });
 
 app.patch('/api/clients/:id', requireCoach, (req, res) => {
@@ -525,6 +648,130 @@ app.post('/api/meal-suggestions', requireCoach, (req, res) => {
 
 app.delete('/api/meal-suggestions/:id', requireCoach, (req, res) => {
   db.prepare('DELETE FROM meal_suggestions WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ============================================================
+// LEADS / INQUIRIES
+//
+// POST /api/inquiries is the one genuinely public write endpoint in this app.
+// It receives submissions from the CoachingCTA component embedded in the free
+// HAM app (different origin), so it needs CORS. Everything else stays same-origin.
+//
+// Three layers of spam defense:
+//   1. CORS allowlist below — currently set to "any origin" because the HAM
+//      app's domain isn't finalized. Tighten to a specific domain when known.
+//   2. Honeypot field "website" — bots fill hidden inputs, humans don't. If
+//      present and non-empty, we return success but silently drop the payload.
+//   3. In-memory per-IP rate limit: 5 inquiries / hour. Resets on server
+//      restart which is fine for Render's infrequent redeploys.
+// ============================================================
+
+// Simple in-memory rate limiter. Map<ip, { count, resetAt }>.
+const inquiryRateLimit = new Map();
+const INQUIRY_LIMIT = 5;
+const INQUIRY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+function checkInquiryRateLimit(ip) {
+  const now = Date.now();
+  const entry = inquiryRateLimit.get(ip);
+  if (!entry || entry.resetAt < now) {
+    inquiryRateLimit.set(ip, { count: 1, resetAt: now + INQUIRY_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= INQUIRY_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+// Periodic cleanup so the map doesn't grow forever on a long-lived process
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of inquiryRateLimit) {
+    if (entry.resetAt < now) inquiryRateLimit.delete(ip);
+  }
+}, 10 * 60 * 1000).unref();
+
+// CORS — only on the inquiry endpoint. Everything else is same-origin.
+function inquiryCORS(req, res, next) {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+}
+
+app.options('/api/inquiries', inquiryCORS);
+app.post('/api/inquiries', inquiryCORS, (req, res) => {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  if (!checkInquiryRateLimit(ip)) {
+    return res.status(429).json({ error: 'too many inquiries from this address, please try again later' });
+  }
+
+  const { name, email, phone, message, website, source } = req.body || {};
+
+  // Honeypot — real users don't fill this. Fake a success so bots don't retry.
+  if (website && String(website).trim()) {
+    return res.json({ ok: true });
+  }
+
+  const cleanName    = (name    || '').trim().slice(0, 100);
+  const cleanEmail   = (email   || '').trim().slice(0, 200);
+  const cleanPhone   = (phone   || '').trim().slice(0, 50);
+  const cleanMessage = (message || '').trim().slice(0, 2000);
+  const cleanSource  = ['ham_app', 'direct', 'other'].includes(source) ? source : 'ham_app';
+
+  if (!cleanName)  return res.status(400).json({ error: 'name required' });
+  if (!cleanEmail) return res.status(400).json({ error: 'email required' });
+  if (!/^\S+@\S+\.\S+$/.test(cleanEmail)) return res.status(400).json({ error: 'invalid email' });
+
+  const id = uid('ld');
+  db.prepare(
+    'INSERT INTO leads (id, name, email, phone, message, source, status, coach_notes, converted_to_client_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(id, cleanName, cleanEmail, cleanPhone, cleanMessage, cleanSource, 'new', '', null, new Date().toISOString());
+
+  res.json({ ok: true });
+});
+
+app.get('/api/leads', requireCoach, (req, res) => {
+  // Sort: active statuses first (new, contacted), then converted/archived. Within a group, newest first.
+  const rows = db.prepare(`
+    SELECT * FROM leads
+    ORDER BY
+      CASE status
+        WHEN 'new' THEN 0
+        WHEN 'contacted' THEN 1
+        WHEN 'converted' THEN 2
+        WHEN 'archived' THEN 3
+        ELSE 4
+      END,
+      created_at DESC
+  `).all();
+  res.json(rows);
+});
+
+app.patch('/api/leads/:id', requireCoach, (req, res) => {
+  const existing = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const { status, coach_notes, converted_to_client_id } = req.body;
+  const fields = [], values = [];
+  if (status !== undefined) {
+    if (!['new', 'contacted', 'converted', 'archived'].includes(status)) {
+      return res.status(400).json({ error: 'invalid status' });
+    }
+    fields.push('status = ?'); values.push(status);
+  }
+  if (coach_notes !== undefined) { fields.push('coach_notes = ?'); values.push((coach_notes || '').trim()); }
+  if (converted_to_client_id !== undefined) { fields.push('converted_to_client_id = ?'); values.push(converted_to_client_id || null); }
+  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+
+  values.push(req.params.id);
+  db.prepare(`UPDATE leads SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  res.json(db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/leads/:id', requireCoach, (req, res) => {
+  db.prepare('DELETE FROM leads WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
