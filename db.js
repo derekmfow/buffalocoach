@@ -88,7 +88,9 @@ CREATE TABLE IF NOT EXISTS exercises (
   muscle_group  TEXT NOT NULL,       -- Legs, Back, Chest, Shoulders, Arms, Core
   category      TEXT NOT NULL,       -- Compound | Isolation | Accessory
   notes         TEXT DEFAULT '',
-  created_at    TEXT NOT NULL
+  owner_id      TEXT,                 -- NULL = global (coach's library). client_id = private to that client.
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (owner_id) REFERENCES clients(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS templates (
@@ -165,6 +167,13 @@ CREATE TABLE IF NOT EXISTS client_programs (
   if (!checkinCols.includes('is_locked')) {
     console.log('[db] Migration: adding is_locked column to weekly_checkins');
     db.exec('ALTER TABLE weekly_checkins ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0');
+  }
+  const exerciseCols = db.prepare("PRAGMA table_info(exercises)").all().map(c => c.name);
+  if (!exerciseCols.includes('owner_id')) {
+    console.log('[db] Migration: adding owner_id column to exercises');
+    // Can't add FK constraint via ALTER in SQLite, but the column alone is enough —
+    // referential integrity for owner_id is enforced in application code.
+    db.exec('ALTER TABLE exercises ADD COLUMN owner_id TEXT');
   }
 })();
 
