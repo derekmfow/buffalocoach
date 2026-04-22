@@ -732,7 +732,7 @@ function ResendLoginButton({ clientId }) {
 /* =========================================================
    CLIENT DETAIL
    ========================================================= */
-function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, clientProgram, programs, exercises, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onToggleCheckinLock, onSaveMealSuggestion, onDeleteMealSuggestion, onAssignProgram, onUpdateClientProgram, onUnassignProgram, onSwapClientExercise, onSetStatus, onDelete, onBack }) {
+function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, clientProgram, programs, exercises, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onToggleCheckinLock, onSaveMealSuggestion, onDeleteMealSuggestion, onAssignProgram, onUpdateClientProgram, onUnassignProgram, onCreateExercise, onSetStatus, onDelete, onBack }) {
   const [tab, setTab] = useState('timeline');
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -833,7 +833,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
       {tab==='checkins'  && <CheckinsTab checkins={clientCheckins} onToggleLock={onToggleCheckinLock}/>}
       {tab==='questions' && <QuestionsTab questions={clientQuestions} onToggleResolve={onToggleResolveQuestion}/>}
       {tab==='notes'     && <NotesTab notes={clientNotes} clientId={client.id} onAdd={onAddNote} onUpdate={onUpdateNote} onDelete={onDeleteNote}/>}
-      {tab==='workout'   && <WorkoutCoachTab client={client} clientProgram={clientProgram} programs={programs} exercises={exercises} onAssign={onAssignProgram} onUpdate={onUpdateClientProgram} onUnassign={onUnassignProgram} onSwap={onSwapClientExercise}/>}
+      {tab==='workout'   && <WorkoutCoachTab client={client} clientProgram={clientProgram} programs={programs} exercises={exercises.filter(e => !e.owner_id || e.owner_id === client.id)} onAssign={onAssignProgram} onUpdate={onUpdateClientProgram} onUnassign={onUnassignProgram} onCreateExercise={onCreateExercise}/>}
       {tab==='actions'   && <ActionsTab client={client} onSetStatus={onSetStatus} onDelete={onDelete}/>}
 
       {uploadOpen && <UploadModal client={client} onClose={()=>setUploadOpen(false)} onSave={(d)=>{ onAddLog(d); setUploadOpen(false); }}/>}
@@ -1369,232 +1369,217 @@ function ActionCard({ title, body, buttonLabel, buttonDisabled, onClick, tone })
 }
 
 /* =========================================================
-   WORKOUT TAB (coach side, per client).
+   WORKOUT PLAN EDITOR — shared between coach and client.
 
-   When no program is assigned: "Assign Program" panel (pick from library + optional coach note).
-   When a program is assigned: editable view of the client's snapshot.
-     - Coach can edit coach_note inline
-     - Per exercise: edit sets / reps / rationale in place, swap exercise
-     - Unassign button + Change Program button (both warn first)
-   Uses SwapExerciseModal (shared with the client side).
+   Every editable bit of a client_program happens here:
+     - rename plan + description
+     - add / remove / reorder / rename days
+     - within each day: add / remove / reorder / swap / edit exercises
+   Coach mode adds: edit coach_note, edit program notes, change program, unassign.
+
+   Mutations are expressed as full-days patches via onUpdate({ days }). The parent
+   handles the server round-trip. Optimistic: we don't mirror state locally, so
+   if the server fails, the UI snaps back when the parent refuses the update.
+
+   Hoisting note: function declarations are hoisted, so ClientWorkoutView (later
+   in the file) can reference the components defined here without issue.
    ========================================================= */
-function WorkoutCoachTab({ client, clientProgram, programs, exercises, onAssign, onUpdate, onUnassign, onSwap }) {
-  if (!clientProgram) {
-    return <AssignProgramPanel client={client} programs={programs} onAssign={onAssign}/>;
-  }
-  return <EditableClientProgram
-    client={client}
-    clientProgram={clientProgram}
-    programs={programs}
-    exercises={exercises}
-    onUpdate={onUpdate}
-    onUnassign={onUnassign}
-    onSwap={onSwap}
-  />;
-}
 
-function AssignProgramPanel({ client, programs, onAssign }) {
-  const [selectedId, setSelectedId] = useState('');
-  const [coachNote, setCoachNote] = useState('');
-  const [busy, setBusy] = useState(false);
+// Default values used when adding a fresh exercise slot to a day.
+const DEFAULT_EXERCISE_SLOT = { sets: 3, reps: '8-12', rest_seconds: 90, rationale: '' };
 
-  const submit = async () => {
-    if (!selectedId || busy) return;
-    setBusy(true);
-    try { await onAssign(selectedId, coachNote); }
-    catch (e) { alert('Assign failed: ' + e.message); setBusy(false); }
-  };
+// Sensible ordering for the "add exercise" default picker
+const MUSCLE_GROUPS_ORDER = ['Legs', 'Back', 'Chest', 'Shoulders', 'Arms', 'Core'];
 
-  const selected = programs.find(p => p.id === selectedId);
-
-  return (
-    <div className="max-w-2xl">
-      <div className="bg-white border border-neutral-200 rounded p-5 mb-4">
-        <h3 className="font-display font-bold text-2xl leading-tight mb-1">Assign a workout plan</h3>
-        <p className="text-sm text-neutral-600 mb-5">Pick a program from your library. The client gets their own copy — editing the master library later won't affect {client.name.split(' ')[0]}'s plan.</p>
-
-        {programs.length === 0 ? (
-          <div className="text-sm text-neutral-500 italic">Your program library is empty. Build one in the Workouts tab up top, then come back.</div>
-        ) : (
-          <>
-            <Field label="Program">
-              <select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}
-                className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition bg-white">
-                <option value="">— pick one —</option>
-                {programs.map(p => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.days.length} day{p.days.length===1?'':'s'})</option>
-                ))}
-              </select>
-            </Field>
-
-            {selected && (
-              <div className="bg-neutral-50 border border-neutral-200 rounded p-4 my-3 text-sm">
-                {selected.description && <p className="mb-2 text-neutral-800">{selected.description}</p>}
-                <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">DAYS</div>
-                <ul className="list-disc pl-5 text-neutral-700">
-                  {selected.days.map((d, i) => <li key={i}>{d.label}</li>)}
-                </ul>
-              </div>
-            )}
-
-            <Field label="Coach note (optional)" hint="Visible to the client on their Workout screen.">
-              <textarea rows={3} value={coachNote} onChange={(e)=>setCoachNote(e.target.value)}
-                placeholder="e.g. 'Run this 4 weeks. Focus on the lower-body days. We'll re-evaluate and swap to PPL after.'"
-                className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none"/>
-            </Field>
-
-            <button onClick={submit} disabled={!selectedId || busy}
-              className="w-full mt-4 bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.12em] py-3 rounded transition">
-              {busy ? 'ASSIGNING…' : 'ASSIGN PROGRAM'}
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function EditableClientProgram({ client, clientProgram, programs, exercises, onUpdate, onUnassign, onSwap }) {
-  const [swapFor, setSwapFor] = useState(null);
-  const [expandedDay, setExpandedDay] = useState(0);
-  const [editingNote, setEditingNote] = useState(false);
-  const [noteDraft, setNoteDraft] = useState(clientProgram.coach_note || '');
-  const [noteBusy, setNoteBusy] = useState(false);
-  const [showChange, setShowChange] = useState(false);
+function WorkoutPlanEditor({ plan, mode, exercises, onUpdate, onCreateExercise }) {
+  const isCoach = mode === 'coach';
+  // Which day is currently expanded (only one open at a time; -1 = none)
+  const [expandedDay, setExpandedDay] = useState(plan.days.length > 0 ? 0 : -1);
+  // When set: { day_index, exercise_index | null }. null exercise_index = adding a new exercise.
+  const [pickerState, setPickerState] = useState(null);
 
   const exById = useMemo(() => Object.fromEntries(exercises.map(e => [e.id, e])), [exercises]);
 
-  const saveNote = async () => {
-    setNoteBusy(true);
-    try { await onUpdate({ coach_note: noteDraft }); setEditingNote(false); }
-    catch (e) { alert('Failed: ' + e.message); }
-    finally { setNoteBusy(false); }
+  // Helpers to mutate the days array and push the whole thing to the server.
+  const commitDays = (newDays) => onUpdate({ days: newDays });
+
+  const addDay = () => {
+    const label = (prompt('Name this day (e.g. "Upper Body", "Legs Day"):') || '').trim();
+    if (!label) return;
+    const newDays = [...plan.days, { label, exercises: [] }];
+    commitDays(newDays);
+    setExpandedDay(newDays.length - 1);
   };
 
-  // Inline edit of one exercise's sets/reps/rest/rationale. Rewrites the full days array.
-  const updateExercise = async (dayIndex, exerciseIndex, patch) => {
-    const newDays = clientProgram.days.map((d, di) => {
-      if (di !== dayIndex) return d;
+  const renameDay = (di) => {
+    const current = plan.days[di].label;
+    const next = (prompt('Rename this day:', current) || '').trim();
+    if (!next || next === current) return;
+    const newDays = plan.days.map((d, i) => i === di ? { ...d, label: next } : d);
+    commitDays(newDays);
+  };
+
+  const removeDay = (di) => {
+    const day = plan.days[di];
+    if (!confirm(`Remove "${day.label}" and its ${day.exercises.length} exercise${day.exercises.length===1?'':'s'}?`)) return;
+    const newDays = plan.days.filter((_, i) => i !== di);
+    commitDays(newDays);
+    if (expandedDay === di) setExpandedDay(-1);
+  };
+
+  const moveDay = (di, direction) => {
+    const target = di + direction;
+    if (target < 0 || target >= plan.days.length) return;
+    const newDays = [...plan.days];
+    [newDays[di], newDays[target]] = [newDays[target], newDays[di]];
+    commitDays(newDays);
+    if (expandedDay === di) setExpandedDay(target);
+    else if (expandedDay === target) setExpandedDay(di);
+  };
+
+  const addExerciseToDay = (di, newExerciseId) => {
+    const newDays = plan.days.map((d, i) => {
+      if (i !== di) return d;
+      return { ...d, exercises: [...d.exercises, { exercise_id: newExerciseId, ...DEFAULT_EXERCISE_SLOT }] };
+    });
+    commitDays(newDays);
+  };
+
+  const swapExerciseAt = (di, ei, newExerciseId) => {
+    const newDays = plan.days.map((d, i) => {
+      if (i !== di) return d;
       return {
         ...d,
-        exercises: d.exercises.map((e, ei) => ei === exerciseIndex ? { ...e, ...patch } : e),
+        exercises: d.exercises.map((e, j) => j === ei ? { ...e, exercise_id: newExerciseId } : e),
       };
     });
-    await onUpdate({ days: newDays });
+    commitDays(newDays);
   };
 
-  const changeProgram = async (newBaseProgramId) => {
-    if (!confirm('Switching programs will discard any customizations (exercise swaps, sets/reps overrides) on the current plan. Continue?')) return;
-    try { await onUpdate({ __change_to: newBaseProgramId }); setShowChange(false); }
-    catch (e) { alert('Swap failed: ' + e.message); }
+  const removeExerciseAt = (di, ei) => {
+    const newDays = plan.days.map((d, i) => {
+      if (i !== di) return d;
+      return { ...d, exercises: d.exercises.filter((_, j) => j !== ei) };
+    });
+    commitDays(newDays);
   };
 
-  const doUnassign = async () => {
-    if (!confirm(`Unassign this program from ${client.name}? They won't see any workout until you assign a new one.`)) return;
-    try { await onUnassign(); }
-    catch (e) { alert('Unassign failed: ' + e.message); }
+  const moveExerciseAt = (di, ei, direction) => {
+    const target = ei + direction;
+    const day = plan.days[di];
+    if (target < 0 || target >= day.exercises.length) return;
+    const newExercises = [...day.exercises];
+    [newExercises[ei], newExercises[target]] = [newExercises[target], newExercises[ei]];
+    const newDays = plan.days.map((d, i) => i === di ? { ...d, exercises: newExercises } : d);
+    commitDays(newDays);
+  };
+
+  const editExerciseAt = (di, ei, patch) => {
+    const newDays = plan.days.map((d, i) => {
+      if (i !== di) return d;
+      return { ...d, exercises: d.exercises.map((e, j) => j === ei ? { ...e, ...patch } : e) };
+    });
+    commitDays(newDays);
+  };
+
+  // Picker close handler. If the picker was for a specific slot (swap), the new id
+  // replaces the current. If it was "add to this day", the new id appends a slot.
+  const handlePickerSelect = async (newExerciseId) => {
+    if (!pickerState) return;
+    const { day_index, exercise_index } = pickerState;
+    try {
+      if (exercise_index == null) await addExerciseToDay(day_index, newExerciseId);
+      else                         await swapExerciseAt(day_index, exercise_index, newExerciseId);
+      setPickerState(null);
+    } catch (e) { alert('Failed: ' + e.message); }
   };
 
   return (
-    <div className="max-w-3xl">
-      <div className="bg-white border border-neutral-200 rounded p-5 mb-4">
-        <div className="flex items-start justify-between gap-3 mb-1">
-          <div className="min-w-0">
-            <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange">ASSIGNED PROGRAM</div>
-            <h2 className="font-display font-bold text-2xl leading-tight">{clientProgram.name}</h2>
-          </div>
-          <div className="flex gap-2 flex-shrink-0">
-            <button onClick={()=>setShowChange(!showChange)}
-              className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition">
-              CHANGE
-            </button>
-            <button onClick={doUnassign}
-              className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50 transition">
-              UNASSIGN
-            </button>
-          </div>
+    <div>
+      <EditablePlanHeader plan={plan} mode={mode} onUpdate={onUpdate}/>
+
+      {isCoach && (
+        <CoachPlanNote plan={plan} onUpdate={onUpdate}/>
+      )}
+      {!isCoach && plan.coach_note && (
+        <div className="bg-brand-orange/5 border border-brand-orange/30 rounded-lg p-4 mb-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange mb-1">NOTE FROM DEREK</div>
+          <p className="text-neutral-800 leading-relaxed text-sm whitespace-pre-wrap">{plan.coach_note}</p>
         </div>
-        {clientProgram.description && <p className="text-sm text-neutral-600 mt-2 leading-relaxed">{clientProgram.description}</p>}
+      )}
 
-        {showChange && (
-          <div className="mt-4 pt-4 border-t border-neutral-100">
-            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">SWITCH TO</div>
-            <div className="space-y-1">
-              {programs.filter(p => p.id !== clientProgram.base_program_id).map(p => (
-                <button key={p.id} onClick={()=>changeProgram(p.id)}
-                  className="w-full text-left px-3 py-2.5 rounded border border-neutral-200 hover:border-brand-orange hover:bg-brand-orange/5 transition">
-                  <div className="font-display font-bold text-base leading-tight">{p.name}</div>
-                  <div className="text-xs text-neutral-500">{p.days.length} day{p.days.length===1?'':'s'} · {p.description}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Coach note */}
-      <div className="bg-brand-orange/5 border border-brand-orange/30 rounded p-4 mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange">NOTE TO CLIENT</div>
-          {!editingNote && (
-            <button onClick={()=>{ setNoteDraft(clientProgram.coach_note || ''); setEditingNote(true); }}
-              className="font-display font-bold tracking-[0.1em] text-[10px] text-neutral-500 hover:text-brand-orange transition">
-              EDIT
-            </button>
-          )}
+      {plan.notes && (
+        <div className="bg-white border border-neutral-200 rounded-lg p-4 mb-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">HOW TO RUN THIS</div>
+          <p className="text-neutral-700 leading-relaxed text-sm whitespace-pre-wrap">{plan.notes}</p>
         </div>
-        {editingNote ? (
-          <>
-            <textarea rows={3} value={noteDraft} onChange={(e)=>setNoteDraft(e.target.value)}
-              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none text-sm mb-2"/>
-            <div className="flex gap-2">
-              <button onClick={()=>setEditingNote(false)} disabled={noteBusy}
-                className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
-                CANCEL
-              </button>
-              <button onClick={saveNote} disabled={noteBusy}
-                className="font-display font-bold tracking-[0.1em] text-[11px] px-4 py-1.5 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition disabled:opacity-60">
-                {noteBusy ? 'SAVING…' : 'SAVE'}
-              </button>
-            </div>
-          </>
-        ) : (
-          <p className="text-sm text-neutral-800 leading-relaxed whitespace-pre-wrap">
-            {clientProgram.coach_note || <span className="text-neutral-400 italic">No note yet.</span>}
-          </p>
-        )}
-      </div>
+      )}
 
-      {/* Days + exercises with inline editing */}
-      <div className="space-y-2">
-        {clientProgram.days.map((day, di) => {
+      {/* Days */}
+      <div className="space-y-2 mb-3">
+        {plan.days.map((day, di) => {
           const isOpen = expandedDay === di;
           return (
-            <div key={di} className={`bg-white border rounded overflow-hidden transition ${isOpen ? 'border-brand-orange' : 'border-neutral-200'}`}>
-              <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
-                className="w-full text-left px-4 py-3 flex items-center justify-between gap-3 hover:bg-neutral-50 transition">
-                <div className="flex items-baseline gap-3 min-w-0">
+            <div key={di} className={`bg-white border rounded-lg overflow-hidden transition ${isOpen ? 'border-brand-orange' : 'border-neutral-200'}`}>
+              <div className="w-full flex items-center gap-2 px-3 py-3 hover:bg-neutral-50 transition">
+                {/* Reorder buttons */}
+                <div className="flex flex-col gap-0.5 flex-shrink-0">
+                  <button onClick={()=>moveDay(di, -1)} disabled={di === 0}
+                    title="Move up"
+                    className="w-6 h-4 flex items-center justify-center text-neutral-400 hover:text-brand-black disabled:opacity-20 disabled:cursor-not-allowed text-xs">▲</button>
+                  <button onClick={()=>moveDay(di, 1)} disabled={di === plan.days.length - 1}
+                    title="Move down"
+                    className="w-6 h-4 flex items-center justify-center text-neutral-400 hover:text-brand-black disabled:opacity-20 disabled:cursor-not-allowed text-xs">▼</button>
+                </div>
+                <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
+                  className="flex-1 text-left flex items-baseline gap-3 min-w-0">
                   <div className="font-display font-bold text-2xl leading-none text-brand-orange flex-shrink-0">D{di+1}</div>
                   <div className="min-w-0">
                     <div className="font-display font-bold text-lg leading-tight">{day.label}</div>
                     <div className="text-xs text-neutral-500">{day.exercises.length} exercise{day.exercises.length===1?'':'s'}</div>
                   </div>
-                </div>
-                <div className={`text-neutral-400 transition-transform flex-shrink-0 ${isOpen ? 'rotate-90' : ''}`}>›</div>
-              </button>
+                </button>
+                {/* Day actions */}
+                <button onClick={()=>renameDay(di)} title="Rename this day"
+                  className="font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded border border-neutral-200 text-neutral-500 hover:border-brand-black hover:text-brand-black transition flex-shrink-0">
+                  RENAME
+                </button>
+                <button onClick={()=>removeDay(di)} title="Remove this day"
+                  className="font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded text-red-600 hover:bg-red-50 transition flex-shrink-0">
+                  ✕
+                </button>
+                <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
+                  className={`text-neutral-400 hover:text-brand-black transition-transform flex-shrink-0 ml-1 ${isOpen ? 'rotate-90' : ''}`}>›</button>
+              </div>
 
               {isOpen && (
-                <div className="border-t border-neutral-100 divide-y divide-neutral-100">
-                  {day.exercises.map((slot, ei) => (
-                    <CoachEditableExerciseRow
-                      key={ei}
-                      index={ei+1}
-                      slot={slot}
-                      exercise={exById[slot.exercise_id]}
-                      onEdit={(patch)=>updateExercise(di, ei, patch)}
-                      onSwap={()=>setSwapFor({ dayIndex: di, exerciseIndex: ei, currentExercise: exById[slot.exercise_id] })}
-                    />
-                  ))}
+                <div className="border-t border-neutral-100">
+                  {day.exercises.length === 0 ? (
+                    <p className="text-sm text-neutral-400 italic py-4 px-4 text-center">No exercises yet. Add your first one below.</p>
+                  ) : (
+                    <div className="divide-y divide-neutral-100">
+                      {day.exercises.map((slot, ei) => (
+                        <ExerciseSlotRow
+                          key={ei}
+                          index={ei+1}
+                          slot={slot}
+                          exercise={exById[slot.exercise_id]}
+                          isFirst={ei === 0}
+                          isLast={ei === day.exercises.length - 1}
+                          onEdit={(patch)=>editExerciseAt(di, ei, patch)}
+                          onSwap={()=>setPickerState({ day_index: di, exercise_index: ei })}
+                          onMove={(dir)=>moveExerciseAt(di, ei, dir)}
+                          onRemove={()=>removeExerciseAt(di, ei)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  <div className="p-3 bg-neutral-50 border-t border-neutral-100">
+                    <button onClick={()=>setPickerState({ day_index: di, exercise_index: null })}
+                      className="w-full border border-dashed border-neutral-300 hover:border-brand-orange hover:text-brand-orange text-neutral-500 font-display font-bold tracking-[0.12em] text-xs py-2.5 rounded transition">
+                      + ADD EXERCISE
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1602,35 +1587,145 @@ function EditableClientProgram({ client, clientProgram, programs, exercises, onU
         })}
       </div>
 
-      {swapFor && (
-        <SwapExerciseModal
-          current={swapFor.currentExercise}
+      {/* Add day */}
+      <button onClick={addDay}
+        className="w-full border border-dashed border-neutral-300 hover:border-brand-orange hover:text-brand-orange text-neutral-500 font-display font-bold tracking-[0.12em] text-sm py-4 rounded-lg transition mb-4">
+        + ADD DAY
+      </button>
+
+      {pickerState && (
+        <ExercisePickerModal
+          current={pickerState.exercise_index != null ? exById[plan.days[pickerState.day_index].exercises[pickerState.exercise_index].exercise_id] : null}
           exercises={exercises}
-          onSelect={async (newId) => {
-            try {
-              await onSwap(swapFor.dayIndex, swapFor.exerciseIndex, newId);
-              setSwapFor(null);
-            } catch (e) { alert('Swap failed: ' + e.message); }
-          }}
-          onClose={()=>setSwapFor(null)}
+          onSelect={handlePickerSelect}
+          onCreateExercise={onCreateExercise}
+          onClose={()=>setPickerState(null)}
         />
       )}
     </div>
   );
 }
 
-// One exercise row with inline edit for sets/reps/rest/rationale. Kept simple:
-// click EDIT → inputs appear → SAVE to commit.
-function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
+// Plan name + description — click to edit.
+function EditablePlanHeader({ plan, mode, onUpdate }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(plan.name);
+  const [desc, setDesc] = useState(plan.description || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setName(plan.name); setDesc(plan.description || ''); }, [plan.name, plan.description]);
+
+  const save = async () => {
+    setBusy(true);
+    try { await onUpdate({ name: name.trim() || 'My Workout', description: desc }); setEditing(false); }
+    catch (e) { alert('Failed: ' + e.message); }
+    finally { setBusy(false); }
+  };
+
+  if (editing) {
+    return (
+      <div className="bg-white border border-brand-orange rounded-lg p-4 mb-4">
+        <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1">NAME</label>
+        <input value={name} onChange={(e)=>setName(e.target.value)}
+          className="w-full border border-neutral-200 rounded px-3 py-2 mb-3 focus:border-brand-orange transition"/>
+        <label className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 block mb-1">DESCRIPTION</label>
+        <textarea value={desc} onChange={(e)=>setDesc(e.target.value)} rows={3}
+          placeholder="Short summary — what is this plan for?"
+          className="w-full border border-neutral-200 rounded px-3 py-2 mb-3 focus:border-brand-orange transition resize-none"/>
+        <div className="flex gap-2">
+          <button onClick={()=>{ setName(plan.name); setDesc(plan.description || ''); setEditing(false); }} disabled={busy}
+            className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
+            CANCEL
+          </button>
+          <button onClick={save} disabled={busy}
+            className="font-display font-bold tracking-[0.1em] text-[11px] px-4 py-1.5 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition disabled:opacity-60">
+            {busy ? 'SAVING…' : 'SAVE'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <div className="min-w-0">
+          <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-1">{mode === 'coach' ? 'ASSIGNED PROGRAM' : 'YOUR PLAN'}</div>
+          <h1 className="font-display font-bold text-3xl sm:text-4xl leading-tight">{plan.name}</h1>
+        </div>
+        <button onClick={()=>setEditing(true)}
+          className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black transition flex-shrink-0">
+          EDIT
+        </button>
+      </div>
+      {plan.description && <p className="text-sm text-neutral-600 leading-relaxed">{plan.description}</p>}
+    </div>
+  );
+}
+
+// Coach's note to client — coach can edit inline.
+function CoachPlanNote({ plan, onUpdate }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(plan.coach_note || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setDraft(plan.coach_note || ''); }, [plan.coach_note]);
+
+  const save = async () => {
+    setBusy(true);
+    try { await onUpdate({ coach_note: draft }); setEditing(false); }
+    catch (e) { alert('Failed: ' + e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="bg-brand-orange/5 border border-brand-orange/30 rounded p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange">NOTE TO CLIENT</div>
+        {!editing && (
+          <button onClick={()=>{ setDraft(plan.coach_note || ''); setEditing(true); }}
+            className="font-display font-bold tracking-[0.1em] text-[10px] text-neutral-500 hover:text-brand-orange transition">
+            EDIT
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <>
+          <textarea rows={3} value={draft} onChange={(e)=>setDraft(e.target.value)}
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none text-sm mb-2"/>
+          <div className="flex gap-2">
+            <button onClick={()=>setEditing(false)} disabled={busy}
+              className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
+              CANCEL
+            </button>
+            <button onClick={save} disabled={busy}
+              className="font-display font-bold tracking-[0.1em] text-[11px] px-4 py-1.5 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition disabled:opacity-60">
+              {busy ? 'SAVING…' : 'SAVE'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="text-sm text-neutral-800 leading-relaxed whitespace-pre-wrap">
+          {plan.coach_note || <span className="text-neutral-400 italic">No note yet.</span>}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// One exercise row. Compact view with reorder + inline edit + swap + remove.
+function ExerciseSlotRow({ index, slot, exercise, isFirst, isLast, onEdit, onSwap, onMove, onRemove }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(slot);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setDraft(slot); }, [slot]);
 
   const save = async () => {
     setBusy(true);
     try {
       await onEdit({
-        sets:         draft.sets,
+        sets:         Number(draft.sets) || 0,
         reps:         draft.reps,
         rest_seconds: draft.rest_seconds === '' || draft.rest_seconds == null ? null : Number(draft.rest_seconds),
         rationale:    draft.rationale || '',
@@ -1641,11 +1736,18 @@ function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
   };
 
   return (
-    <div className="px-4 py-4">
-      <div className="flex items-start gap-3 mb-2">
-        <div className="font-display font-bold text-xl w-6 text-center leading-none text-neutral-400 flex-shrink-0 pt-0.5">{index}</div>
+    <div className="px-3 py-3">
+      <div className="flex items-start gap-2 mb-2">
+        {/* Reorder */}
+        <div className="flex flex-col gap-0.5 flex-shrink-0 pt-1">
+          <button onClick={()=>onMove(-1)} disabled={isFirst}
+            className="w-5 h-4 flex items-center justify-center text-neutral-400 hover:text-brand-black disabled:opacity-20 disabled:cursor-not-allowed text-[10px]">▲</button>
+          <button onClick={()=>onMove(1)} disabled={isLast}
+            className="w-5 h-4 flex items-center justify-center text-neutral-400 hover:text-brand-black disabled:opacity-20 disabled:cursor-not-allowed text-[10px]">▼</button>
+        </div>
+        <div className="font-display font-bold text-lg w-5 text-center leading-none text-neutral-400 flex-shrink-0 pt-0.5">{index}</div>
         <div className="flex-1 min-w-0">
-          <div className="font-display font-bold text-base leading-tight mb-0.5">
+          <div className="font-display font-bold text-base leading-tight">
             {exercise ? exercise.name : <span className="text-neutral-400 italic">exercise removed</span>}
           </div>
           {exercise && (
@@ -1657,23 +1759,27 @@ function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
         <div className="flex gap-1 flex-shrink-0">
           {!editing && (
             <button onClick={()=>{ setDraft(slot); setEditing(true); }}
-              className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black transition">
+              className="font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded border border-neutral-200 text-neutral-500 hover:border-brand-black hover:text-brand-black transition">
               EDIT
             </button>
           )}
           <button onClick={onSwap}
-            className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition">
+            className="font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded border border-neutral-200 text-neutral-500 hover:border-brand-orange hover:text-brand-orange transition">
             SWAP
+          </button>
+          <button onClick={onRemove} title="Remove"
+            className="font-display font-bold tracking-[0.1em] text-[10px] px-2 py-1 rounded text-red-600 hover:bg-red-50 transition">
+            ✕
           </button>
         </div>
       </div>
 
       {editing ? (
-        <div className="pl-9 space-y-2">
+        <div className="pl-11 space-y-2">
           <div className="grid grid-cols-3 gap-2">
             <div>
               <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">SETS</label>
-              <input type="number" value={draft.sets} onChange={(e)=>setDraft({...draft, sets:Number(e.target.value)||0})}
+              <input type="number" inputMode="numeric" value={draft.sets} onChange={(e)=>setDraft({...draft, sets:e.target.value})}
                 className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition"/>
             </div>
             <div>
@@ -1684,17 +1790,17 @@ function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
             </div>
             <div>
               <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">REST (SEC)</label>
-              <input type="number" value={draft.rest_seconds ?? ''} onChange={(e)=>setDraft({...draft, rest_seconds:e.target.value})}
+              <input type="number" inputMode="numeric" value={draft.rest_seconds ?? ''} onChange={(e)=>setDraft({...draft, rest_seconds:e.target.value})}
                 className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition"/>
             </div>
           </div>
           <div>
-            <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">RATIONALE</label>
+            <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">NOTE (OPTIONAL)</label>
             <textarea rows={2} value={draft.rationale || ''} onChange={(e)=>setDraft({...draft, rationale:e.target.value})}
               className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition resize-none"/>
           </div>
           <div className="flex gap-2">
-            <button onClick={()=>setEditing(false)} disabled={busy}
+            <button onClick={()=>{ setDraft(slot); setEditing(false); }} disabled={busy}
               className="font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
               CANCEL
             </button>
@@ -1706,15 +1812,349 @@ function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
         </div>
       ) : (
         <>
-          <div className="flex flex-wrap gap-3 text-sm mb-2 pl-9">
+          <div className="flex flex-wrap gap-3 text-sm mb-1 pl-11">
             <div><span className="text-neutral-500">Sets:</span> <strong>{slot.sets}</strong></div>
             <div><span className="text-neutral-500">Reps:</span> <strong>{slot.reps}</strong></div>
             <div><span className="text-neutral-500">Rest:</span> <strong>{slot.rest_seconds != null ? slot.rest_seconds + 's' : '—'}</strong></div>
           </div>
           {slot.rationale && (
-            <p className="text-sm text-neutral-700 leading-relaxed pl-9 italic">{slot.rationale}</p>
+            <p className="text-sm text-neutral-700 leading-relaxed pl-11 italic">{slot.rationale}</p>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// Exercise picker. Used for both swapping and adding.
+// When `current` is set: filter defaults to same muscle group (swap context).
+// When `current` is null: show all, allow filter by group.
+// Always offers a "+ NEW EXERCISE" option that reveals an inline create form.
+function ExercisePickerModal({ current, exercises, onSelect, onCreateExercise, onClose }) {
+  // Start filter matching current's muscle group if swapping; else 'all'.
+  const [filter, setFilter] = useState(current ? current.muscle_group : 'all');
+  const [search, setSearch] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const filtered = useMemo(() => {
+    return exercises
+      .filter(e => !current || e.id !== current.id)
+      .filter(e => filter === 'all' || e.muscle_group === filter)
+      .filter(e => !search.trim() || e.name.toLowerCase().includes(search.toLowerCase().trim()))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [exercises, current, filter, search]);
+
+  const title = current ? `Swap: ${current.name}` : 'Add Exercise';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg max-h-[90vh] overflow-hidden flex flex-col"
+           onClick={(e)=>e.stopPropagation()}>
+        <div className="p-5 border-b border-neutral-200">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div className="min-w-0">
+              <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">
+                {current ? 'SWAPPING' : 'ADD EXERCISE'}
+              </div>
+              <div className="font-display font-bold text-xl leading-tight truncate">{title}</div>
+              {current && <div className="text-xs text-neutral-500 mt-0.5">{current.muscle_group} · {current.category}</div>}
+            </div>
+            <button onClick={onClose} className="text-neutral-400 hover:text-brand-black text-2xl leading-none flex-shrink-0">×</button>
+          </div>
+
+          <input value={search} onChange={(e)=>setSearch(e.target.value)}
+            placeholder="Search exercises..."
+            className="w-full border border-neutral-200 rounded px-3 py-2 text-sm focus:border-brand-orange transition mb-2"/>
+
+          <div className="flex flex-wrap gap-1">
+            <button onClick={()=>setFilter('all')}
+              className={`font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded transition ${
+                filter==='all' ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+              }`}>
+              ALL
+            </button>
+            {MUSCLE_GROUPS_ORDER.map(g => (
+              <button key={g} onClick={()=>setFilter(g)}
+                className={`font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded transition ${
+                  filter===g ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                }`}>
+                {g.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3">
+          {creating ? (
+            <NewExerciseForm
+              defaultGroup={filter !== 'all' ? filter : (current?.muscle_group || 'Legs')}
+              onCancel={()=>setCreating(false)}
+              onCreated={async (created) => {
+                setCreating(false);
+                onSelect(created.id);
+              }}
+              onCreate={onCreateExercise}
+            />
+          ) : (
+            <>
+              <button onClick={()=>setCreating(true)}
+                className="w-full border border-dashed border-brand-orange text-brand-orange hover:bg-brand-orange/5 font-display font-bold tracking-[0.12em] text-xs py-3 rounded mb-3 transition">
+                + NEW EXERCISE
+              </button>
+
+              {filtered.length === 0 ? (
+                <p className="text-center text-neutral-500 text-sm py-6">No matches. Try "All" or search differently.</p>
+              ) : (
+                <div className="space-y-1">
+                  {filtered.map(ex => (
+                    <button key={ex.id} onClick={()=>onSelect(ex.id)}
+                      className="w-full text-left px-3 py-3 rounded hover:bg-brand-orange/5 hover:border-brand-orange border border-transparent transition">
+                      <div className="flex items-center gap-2">
+                        <div className="font-display font-bold text-base leading-tight">{ex.name}</div>
+                        {ex.owner_id && <span className="font-display font-bold tracking-[0.1em] text-[9px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">YOURS</span>}
+                      </div>
+                      <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase mb-1">
+                        {ex.muscle_group} · {ex.category}
+                      </div>
+                      {ex.notes && <div className="text-xs text-neutral-600 leading-snug">{ex.notes}</div>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Inline form to create a new exercise from within the picker.
+function NewExerciseForm({ defaultGroup, onCreate, onCreated, onCancel }) {
+  const [name, setName] = useState('');
+  const [muscleGroup, setMuscleGroup] = useState(defaultGroup || 'Legs');
+  const [category, setCategory] = useState('Compound');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      const created = await onCreate({ name: name.trim(), muscle_group: muscleGroup, category, notes });
+      onCreated(created);
+    } catch (e) { alert('Failed: ' + e.message); setBusy(false); }
+  };
+
+  return (
+    <div className="bg-neutral-50 border border-neutral-200 rounded p-4">
+      <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-3">NEW EXERCISE</div>
+      <div className="space-y-2">
+        <div>
+          <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">NAME</label>
+          <input autoFocus value={name} onChange={(e)=>setName(e.target.value)} placeholder="e.g. Hack Squat"
+            className="w-full border border-neutral-200 rounded px-2 py-2 text-sm focus:border-brand-orange transition"/>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">MUSCLE GROUP</label>
+            <select value={muscleGroup} onChange={(e)=>setMuscleGroup(e.target.value)}
+              className="w-full border border-neutral-200 rounded px-2 py-2 text-sm bg-white focus:border-brand-orange transition">
+              {MUSCLE_GROUPS_ORDER.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">CATEGORY</label>
+            <select value={category} onChange={(e)=>setCategory(e.target.value)}
+              className="w-full border border-neutral-200 rounded px-2 py-2 text-sm bg-white focus:border-brand-orange transition">
+              {['Compound', 'Isolation', 'Accessory'].map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">NOTES (OPTIONAL)</label>
+          <textarea rows={2} value={notes} onChange={(e)=>setNotes(e.target.value)}
+            placeholder="Cues or reminders"
+            className="w-full border border-neutral-200 rounded px-2 py-2 text-sm focus:border-brand-orange transition resize-none"/>
+        </div>
+        <div className="flex gap-2 pt-1">
+          <button onClick={onCancel} disabled={busy}
+            className="flex-1 font-display font-bold tracking-[0.1em] text-[11px] px-3 py-2 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
+            CANCEL
+          </button>
+          <button onClick={submit} disabled={!name.trim() || busy}
+            className="flex-1 font-display font-bold tracking-[0.1em] text-[11px] px-3 py-2 rounded bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 text-white transition">
+            {busy ? 'CREATING…' : 'CREATE & USE'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   COACH WORKOUT TAB — wraps WorkoutPlanEditor with coach-only controls.
+   ========================================================= */
+function WorkoutCoachTab({ client, clientProgram, programs, exercises, onAssign, onUpdate, onUnassign, onSwap, onCreateExercise }) {
+  if (!clientProgram) {
+    return <AssignProgramPanel client={client} programs={programs} onAssign={onAssign}/>;
+  }
+  return (
+    <div>
+      <WorkoutPlanEditor
+        plan={clientProgram}
+        mode="coach"
+        exercises={exercises}
+        onUpdate={onUpdate}
+        onCreateExercise={onCreateExercise}
+      />
+      <CoachPlanFooterActions
+        clientProgram={clientProgram}
+        programs={programs}
+        onChangeProgram={(newId) => onUpdate({ __change_to: newId })}
+        onUnassign={onUnassign}
+      />
+    </div>
+  );
+}
+
+// AssignProgramPanel — unchanged role, new option: "Start blank".
+function AssignProgramPanel({ client, programs, onAssign }) {
+  const [mode, setMode] = useState('library'); // 'library' | 'blank'
+  const [selectedId, setSelectedId] = useState('');
+  const [coachNote, setCoachNote] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    if (mode === 'library' && !selectedId) return;
+    setBusy(true);
+    try {
+      await onAssign(mode === 'library' ? selectedId : null, coachNote);
+    }
+    catch (e) { alert('Assign failed: ' + e.message); setBusy(false); }
+  };
+
+  const selected = programs.find(p => p.id === selectedId);
+
+  return (
+    <div className="max-w-2xl">
+      <div className="bg-white border border-neutral-200 rounded p-5 mb-4">
+        <h3 className="font-display font-bold text-2xl leading-tight mb-1">Assign a workout plan</h3>
+        <p className="text-sm text-neutral-600 mb-5">Start from a program in your library, or give {client.name.split(' ')[0]} a blank plan they can build from scratch. You can edit either one after.</p>
+
+        <div className="flex gap-2 mb-4">
+          <button onClick={()=>setMode('library')}
+            className={`flex-1 font-display font-bold tracking-[0.12em] text-xs px-3 py-2.5 rounded transition ${
+              mode==='library' ? 'bg-brand-black text-white' : 'border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black'
+            }`}>
+            FROM LIBRARY
+          </button>
+          <button onClick={()=>setMode('blank')}
+            className={`flex-1 font-display font-bold tracking-[0.12em] text-xs px-3 py-2.5 rounded transition ${
+              mode==='blank' ? 'bg-brand-black text-white' : 'border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black'
+            }`}>
+            START BLANK
+          </button>
+        </div>
+
+        {mode === 'library' && (
+          programs.length === 0 ? (
+            <div className="text-sm text-neutral-500 italic mb-3">Your program library is empty. Either build one in the Workouts tab up top, or choose START BLANK.</div>
+          ) : (
+            <>
+              <Field label="Program">
+                <select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}
+                  className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition bg-white">
+                  <option value="">— pick one —</option>
+                  {programs.map(p => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.days.length} day{p.days.length===1?'':'s'})</option>
+                  ))}
+                </select>
+              </Field>
+              {selected && (
+                <div className="bg-neutral-50 border border-neutral-200 rounded p-4 my-3 text-sm">
+                  {selected.description && <p className="mb-2 text-neutral-800">{selected.description}</p>}
+                  <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">DAYS</div>
+                  <ul className="list-disc pl-5 text-neutral-700">
+                    {selected.days.map((d, i) => <li key={i}>{d.label}</li>)}
+                  </ul>
+                </div>
+              )}
+            </>
+          )
+        )}
+
+        {mode === 'blank' && (
+          <div className="bg-neutral-50 border border-neutral-200 rounded p-4 my-3 text-sm text-neutral-700">
+            {client.name.split(' ')[0]} will start with an empty plan called "My Workout". They can add days, exercises, and customize everything. You'll be able to see and edit it too.
+          </div>
+        )}
+
+        <Field label="Coach note (optional)" hint="Visible to the client on their Workout screen.">
+          <textarea rows={3} value={coachNote} onChange={(e)=>setCoachNote(e.target.value)}
+            placeholder="e.g. 'Run this 4 weeks. Focus on the lower-body days.'"
+            className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none"/>
+        </Field>
+
+        <button onClick={submit} disabled={busy || (mode === 'library' && !selectedId)}
+          className="w-full mt-4 bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.12em] py-3 rounded transition">
+          {busy ? 'ASSIGNING…' : (mode === 'blank' ? 'CREATE BLANK PLAN' : 'ASSIGN PROGRAM')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Footer actions under the coach's plan view — Change Program + Unassign.
+function CoachPlanFooterActions({ clientProgram, programs, onChangeProgram, onUnassign }) {
+  const [showChange, setShowChange] = useState(false);
+
+  const changeProgram = async (newBaseProgramId) => {
+    if (!confirm('Switching programs will discard any customizations (added days, swaps, edits) on the current plan. Continue?')) return;
+    try { await onChangeProgram(newBaseProgramId); setShowChange(false); }
+    catch (e) { alert('Swap failed: ' + e.message); }
+  };
+
+  const doUnassign = async () => {
+    if (!confirm(`Unassign this plan? They won't see any workout until you assign a new one or they build one themselves.`)) return;
+    try { await onUnassign(); }
+    catch (e) { alert('Unassign failed: ' + e.message); }
+  };
+
+  return (
+    <div className="bg-white border border-neutral-200 rounded p-4 mt-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-display font-bold text-sm leading-tight">Plan controls</div>
+          <div className="text-xs text-neutral-500 mt-0.5">Replace the current plan with a library program, or unassign entirely.</div>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button onClick={()=>setShowChange(!showChange)}
+            className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition">
+            CHANGE PROGRAM
+          </button>
+          <button onClick={doUnassign}
+            className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50 transition">
+            UNASSIGN
+          </button>
+        </div>
+      </div>
+      {showChange && (
+        <div className="mt-4 pt-4 border-t border-neutral-100">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">SWITCH TO</div>
+          <div className="space-y-1">
+            {programs.filter(p => p.id !== clientProgram.base_program_id).length === 0 ? (
+              <div className="text-sm text-neutral-500 italic">No other programs in your library.</div>
+            ) : programs.filter(p => p.id !== clientProgram.base_program_id).map(p => (
+              <button key={p.id} onClick={()=>changeProgram(p.id)}
+                className="w-full text-left px-3 py-2.5 rounded border border-neutral-200 hover:border-brand-orange hover:bg-brand-orange/5 transition">
+                <div className="font-display font-bold text-base leading-tight">{p.name}</div>
+                <div className="text-xs text-neutral-500">{p.days.length} day{p.days.length===1?'':'s'} · {p.description}</div>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1731,6 +2171,13 @@ function WorkoutsView({
 }) {
   const [tab, setTab] = useState('programs');
   const [philosophyOpen, setPhilosophyOpen] = useState(false);
+
+  // The coach's main Workouts library is for THEIR curated content only.
+  // Client-private exercises (owner_id set) stay with that client — we filter
+  // them out of every list here. They remain available inside the picker on
+  // the client's Workout tab via a separate ?client_id= fetch.
+  const globalExercises = useMemo(() => exercises.filter(e => !e.owner_id), [exercises]);
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
       <div className="mb-4">
@@ -1768,7 +2215,7 @@ function WorkoutsView({
           {[
             { id:'programs',  label:'Programs',         count:programs.length },
             { id:'templates', label:'Workout Days',     count:templates.length },
-            { id:'library',   label:'Exercise Library', count:exercises.length },
+            { id:'library',   label:'Exercise Library', count:globalExercises.length },
           ].map(t => (
             <button key={t.id} onClick={()=>setTab(t.id)}
               className={`font-display font-semibold tracking-[0.12em] text-sm px-4 py-3 border-b-2 transition whitespace-nowrap ${tab===t.id ? 'border-brand-orange text-brand-black' : 'border-transparent text-neutral-500 hover:text-brand-black'}`}>
@@ -1779,8 +2226,8 @@ function WorkoutsView({
       </div>
 
       {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram}/>}
-      {tab==='templates' && <TemplatesList templates={templates} exercises={exercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate}/>}
-      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise}/>}
+      {tab==='templates' && <TemplatesList templates={templates} exercises={globalExercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate}/>}
+      {tab==='library'   && <ExerciseLibrary exercises={globalExercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise}/>}
     </div>
   );
 }
@@ -3676,213 +4123,53 @@ function ClientTimelineLog({ log, clientId, suggestion }) {
 }
 
 /* ---------- WORKOUT ---------- */
-function ClientWorkoutView({ clientProgram, exercises, onSwap, onBack }) {
-  // Swap modal state. When set, stores { dayIndex, exerciseIndex, currentExercise } identifying the slot being swapped.
-  const [swapFor, setSwapFor] = useState(null);
-  const [expandedDay, setExpandedDay] = useState(0); // first day open by default
-
-  // Map for fast lookup. Exercises should always come from the current library,
-  // so renames and notes stay fresh even for snapshotted programs.
-  const exById = useMemo(() => Object.fromEntries(exercises.map(e => [e.id, e])), [exercises]);
+// Thin wrapper around the shared WorkoutPlanEditor. When the client has no
+// plan, we show a welcome CTA so they can build their own from scratch.
+function ClientWorkoutView({ clientProgram, exercises, onUpdate, onCreateExercise, onCreateBlankPlan, onBack }) {
+  const [creating, setCreating] = useState(false);
 
   if (!clientProgram) {
+    const startBlank = async () => {
+      if (creating) return;
+      setCreating(true);
+      try { await onCreateBlankPlan(); }
+      catch (e) { alert('Failed: ' + e.message); setCreating(false); }
+    };
     return (
       <div className="px-4 sm:px-6 py-6">
         <BackLink onClick={onBack}/>
         <h1 className="font-display font-bold text-4xl leading-none mb-1">My Workout</h1>
         <p className="text-neutral-600 text-sm mb-6">Your training plan will live here.</p>
-        <div className="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center">
-          <p className="text-neutral-800 mb-2">No plan assigned yet.</p>
-          <p className="text-neutral-500 text-sm">Text Derek and he'll put one together for you.</p>
+
+        <div className="bg-white border border-dashed border-neutral-300 rounded-lg p-6 text-center">
+          <p className="text-neutral-800 mb-2 font-medium">No plan yet — build your own.</p>
+          <p className="text-neutral-500 text-sm mb-5">Start with a blank slate and add days + exercises. You can always ask Derek to assign one instead.</p>
+          <button onClick={startBlank} disabled={creating}
+            className="bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 text-white font-display font-bold tracking-[0.12em] text-sm px-5 py-3 rounded transition">
+            {creating ? 'CREATING…' : 'BUILD MY WORKOUT'}
+          </button>
         </div>
       </div>
     );
   }
 
-  const fmtRest = (s) => {
-    if (!s && s !== 0) return '—';
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60), rem = s % 60;
-    return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
-  };
-
-  const openSwap = (dayIndex, exerciseIndex) => {
-    const slot = clientProgram.days[dayIndex].exercises[exerciseIndex];
-    const current = exById[slot.exercise_id];
-    setSwapFor({ dayIndex, exerciseIndex, currentExercise: current });
-  };
-
-  const doSwap = async (newExerciseId) => {
-    if (!swapFor) return;
-    try {
-      await onSwap(swapFor.dayIndex, swapFor.exerciseIndex, newExerciseId);
-      setSwapFor(null);
-    } catch (e) {
-      alert('Swap failed: ' + e.message);
-    }
-  };
-
   return (
     <div className="px-4 sm:px-6 py-6">
       <BackLink onClick={onBack}/>
-      <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-2">YOUR PLAN</div>
-      <h1 className="font-display font-bold text-4xl leading-none mb-2">{clientProgram.name}</h1>
-      {clientProgram.description && (
-        <p className="text-neutral-600 text-sm mb-4 leading-relaxed">{clientProgram.description}</p>
-      )}
-
-      {clientProgram.coach_note && (
-        <div className="bg-brand-orange/5 border border-brand-orange/30 rounded-lg p-4 mb-4">
-          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange mb-1">NOTE FROM DEREK</div>
-          <p className="text-neutral-800 leading-relaxed text-sm whitespace-pre-wrap">{clientProgram.coach_note}</p>
-        </div>
-      )}
-
-      {clientProgram.notes && (
-        <div className="bg-white border border-neutral-200 rounded-lg p-4 mb-4">
-          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">HOW TO RUN THIS</div>
-          <p className="text-neutral-700 leading-relaxed text-sm whitespace-pre-wrap">{clientProgram.notes}</p>
-        </div>
-      )}
-
-      <div className="space-y-2 mb-6">
-        {clientProgram.days.map((day, di) => {
-          const isOpen = expandedDay === di;
-          return (
-            <div key={di} className={`bg-white border rounded-lg overflow-hidden transition ${isOpen ? 'border-brand-orange' : 'border-neutral-200'}`}>
-              <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
-                className="w-full text-left px-4 py-3 flex items-center justify-between gap-3 hover:bg-neutral-50 transition">
-                <div className="flex items-baseline gap-3 min-w-0">
-                  <div className="font-display font-bold text-2xl leading-none text-brand-orange flex-shrink-0">D{di+1}</div>
-                  <div className="min-w-0">
-                    <div className="font-display font-bold text-lg leading-tight">{day.label}</div>
-                    <div className="text-xs text-neutral-500">{day.exercises.length} exercise{day.exercises.length===1?'':'s'}</div>
-                  </div>
-                </div>
-                <div className={`text-neutral-400 transition-transform flex-shrink-0 ${isOpen ? 'rotate-90' : ''}`}>›</div>
-              </button>
-
-              {isOpen && (
-                <div className="border-t border-neutral-100 divide-y divide-neutral-100">
-                  {day.exercises.map((slot, ei) => {
-                    const ex = exById[slot.exercise_id];
-                    return (
-                      <div key={ei} className="px-4 py-4">
-                        <div className="flex items-start gap-3 mb-2">
-                          <div className="font-display font-bold text-xl w-6 text-center leading-none text-neutral-400 flex-shrink-0 pt-0.5">{ei+1}</div>
-                          <div className="flex-1 min-w-0">
-                            <div className="font-display font-bold text-base leading-tight mb-0.5">
-                              {ex ? ex.name : <span className="text-neutral-400 italic">exercise removed</span>}
-                            </div>
-                            {ex && (
-                              <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase">
-                                {ex.muscle_group} · {ex.category}
-                              </div>
-                            )}
-                          </div>
-                          <button onClick={()=>openSwap(di, ei)}
-                            className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition flex-shrink-0">
-                            SWAP
-                          </button>
-                        </div>
-
-                        <div className="flex flex-wrap gap-3 text-sm mb-2 pl-9">
-                          <div><span className="text-neutral-500">Sets:</span> <strong>{slot.sets}</strong></div>
-                          <div><span className="text-neutral-500">Reps:</span> <strong>{slot.reps}</strong></div>
-                          <div><span className="text-neutral-500">Rest:</span> <strong>{fmtRest(slot.rest_seconds)}</strong></div>
-                        </div>
-
-                        {slot.rationale && (
-                          <p className="text-sm text-neutral-700 leading-relaxed pl-9 italic">{slot.rationale}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {swapFor && (
-        <SwapExerciseModal
-          current={swapFor.currentExercise}
-          exercises={exercises}
-          onSelect={doSwap}
-          onClose={()=>setSwapFor(null)}
-        />
-      )}
+      <WorkoutPlanEditor
+        plan={clientProgram}
+        mode="client"
+        exercises={exercises}
+        onUpdate={onUpdate}
+        onCreateExercise={onCreateExercise}
+      />
     </div>
   );
 }
 
-// Modal for swapping an exercise. Filters alternatives by the current exercise's
-// muscle group so clients can't accidentally swap a bench press for a leg curl.
-function SwapExerciseModal({ current, exercises, onSelect, onClose }) {
-  const [filter, setFilter] = useState('same'); // 'same' | 'all'
-
-  // Default: same muscle group, excluding current
-  const alternatives = exercises
-    .filter(e => e.id !== current?.id)
-    .filter(e => filter === 'all' || (current && e.muscle_group === current.muscle_group))
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60"
-         onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg max-h-[85vh] overflow-hidden flex flex-col"
-           onClick={(e)=>e.stopPropagation()}>
-        <div className="p-5 border-b border-neutral-200">
-          <div className="flex items-start justify-between gap-3 mb-2">
-            <div>
-              <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">SWAPPING</div>
-              <div className="font-display font-bold text-xl leading-tight">{current?.name || 'this exercise'}</div>
-              {current && <div className="text-xs text-neutral-500 mt-0.5">{current.muscle_group} · {current.category}</div>}
-            </div>
-            <button onClick={onClose} className="text-neutral-400 hover:text-brand-black text-2xl leading-none">×</button>
-          </div>
-          <div className="flex gap-1 mt-3">
-            <button onClick={()=>setFilter('same')}
-              className={`font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded transition ${
-                filter==='same' ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
-              }`}>
-              SAME MUSCLE GROUP
-            </button>
-            <button onClick={()=>setFilter('all')}
-              className={`font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded transition ${
-                filter==='all' ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
-              }`}>
-              ALL EXERCISES
-            </button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-3">
-          {alternatives.length === 0 ? (
-            <p className="text-center text-neutral-500 text-sm py-8">No other exercises in this muscle group. Try "All exercises".</p>
-          ) : (
-            <div className="space-y-1">
-              {alternatives.map(ex => (
-                <button key={ex.id} onClick={()=>onSelect(ex.id)}
-                  className="w-full text-left px-3 py-3 rounded hover:bg-brand-orange/5 hover:border-brand-orange border border-transparent transition">
-                  <div className="font-display font-bold text-base leading-tight">{ex.name}</div>
-                  <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase mb-1">
-                    {ex.muscle_group} · {ex.category}
-                  </div>
-                  {ex.notes && <div className="text-xs text-neutral-600 leading-snug">{ex.notes}</div>}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ---------- ROUTER ---------- */
-function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, clientProgram, exercises, onAddMealLog, onSaveCheckin, onPostQuestion, onSwapExercise, onLogout }) {
+function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, clientProgram, exercises, onAddMealLog, onSaveCheckin, onPostQuestion, onUpdateClientProgram, onCreateBlankPlan, onCreateExercise, onLogout }) {
   const [view, setView] = useState('home');
   const goHome = () => setView('home');
   const firstName = client.name.split(/\s+/)[0] || client.name;
@@ -3897,7 +4184,7 @@ function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, cli
         {view === 'checkin'   && <ClientCheckinView   client={client} checkins={checkins} onSave={onSaveCheckin} onBack={goHome}/>}
         {view === 'questions' && <ClientQuestionsView questions={questions} onPost={onPostQuestion} onBack={goHome}/>}
         {view === 'timeline'  && <ClientTimelineView  client={client} mealLogs={mealLogs} checkins={checkins} mealSuggestions={mealSuggestions} onBack={goHome}/>}
-        {view === 'workout'   && <ClientWorkoutView   clientProgram={clientProgram} exercises={exercises} onSwap={onSwapExercise} onBack={goHome}/>}
+        {view === 'workout'   && <ClientWorkoutView   clientProgram={clientProgram} exercises={exercises} onUpdate={onUpdateClientProgram} onCreateExercise={onCreateExercise} onCreateBlankPlan={onCreateBlankPlan} onBack={goHome}/>}
       </div>
     </div>
   );
@@ -3969,13 +4256,30 @@ function ClientRoot() {
     return saved;
   };
 
-  const swapExercise = async (dayIndex, exerciseIndex, newExerciseId) => {
-    if (!clientProgram) throw new Error('no program assigned');
-    const updated = await api.post(`/api/client-programs/${clientProgram.id}/swap-exercise`, {
-      day_index: dayIndex, exercise_index: exerciseIndex, new_exercise_id: newExerciseId,
-    });
+  // Full plan update — client can change name/description/days (coach_note + notes
+  // are silently ignored by the server for clients). Used by the shared editor.
+  const updateClientProgram = async (patch) => {
+    if (!clientProgram) throw new Error('no program to update');
+    const updated = await api.patch('/api/client-programs/' + clientProgram.id, patch);
     setClientProgram(updated);
     return updated;
+  };
+
+  // Client builds their own plan from scratch — server creates an empty one.
+  const createBlankPlan = async () => {
+    const created = await api.post('/api/client-programs', {}); // server uses session.client_id, no base_program_id = blank
+    setClientProgram(created);
+    return created;
+  };
+
+  // Client creates a private exercise that only they see. Append to local list
+  // so it shows up in the picker immediately.
+  const createExercise = async (data) => {
+    const created = await api.post('/api/exercises', data);
+    setExercises(prev => [...prev, created].sort((a, b) =>
+      a.muscle_group.localeCompare(b.muscle_group) || a.name.localeCompare(b.name)
+    ));
+    return created;
   };
 
   if (state.loading) {
@@ -4000,7 +4304,9 @@ function ClientRoot() {
       onAddMealLog={addMealLog}
       onSaveCheckin={saveCheckin}
       onPostQuestion={postQuestion}
-      onSwapExercise={swapExercise}
+      onUpdateClientProgram={updateClientProgram}
+      onCreateBlankPlan={createBlankPlan}
+      onCreateExercise={createExercise}
       onLogout={logout}
     />
   );
@@ -4170,9 +4476,12 @@ function CoachApp() {
     });
   };
 
+  // Assign a plan. baseProgramId can be null = create a blank plan for them.
   const assignClientProgram = async (clientId, baseProgramId, coachNote) => {
     const saved = await api.post('/api/client-programs', {
-      client_id: clientId, base_program_id: baseProgramId, coach_note: coachNote,
+      client_id: clientId,
+      base_program_id: baseProgramId || undefined, // server treats absent = blank
+      coach_note: coachNote,
     });
     replaceOrInsertClientProgram(saved);
   };
@@ -4202,15 +4511,15 @@ function CoachApp() {
     setClientPrograms(prev => prev.filter(p => p.client_id !== clientId));
   };
 
-  // Coach-side exercise swap — same endpoint as the client's, just called from the coach tab.
-  const swapClientExercise = async (clientId, dayIndex, exerciseIndex, newExerciseId) => {
-    const existing = clientPrograms.find(p => p.client_id === clientId);
-    if (!existing) throw new Error('no program assigned');
-    const saved = await api.post(`/api/client-programs/${existing.id}/swap-exercise`, {
-      day_index: dayIndex, exercise_index: exerciseIndex, new_exercise_id: newExerciseId,
-    });
-    replaceOrInsertClientProgram(saved);
-    return saved;
+  // Coach creates a new global exercise (NULL owner). Different endpoint role
+  // from the existing coach library CRUD — this one is triggered from inside
+  // the exercise picker when the coach wants to add a new exercise mid-edit.
+  const createExerciseFromPicker = async (data) => {
+    const created = await api.post('/api/exercises', data);
+    setExercises(prev => [...prev, created].sort((a, b) =>
+      a.muscle_group.localeCompare(b.muscle_group) || a.name.localeCompare(b.name)
+    ));
+    return created;
   };
 
   // ---- Leads ----
@@ -4442,7 +4751,7 @@ function CoachApp() {
               onAssignProgram={(baseId, note)=>assignClientProgram(selectedClient.id, baseId, note)}
               onUpdateClientProgram={(patch)=>updateClientProgram(selectedClient.id, patch)}
               onUnassignProgram={()=>unassignClientProgram(selectedClient.id)}
-              onSwapClientExercise={(di, ei, newId)=>swapClientExercise(selectedClient.id, di, ei, newId)}
+              onCreateExercise={createExerciseFromPicker}
               onSetStatus={setClientStatus}
               onDelete={deleteClient}
               onBack={()=>{ setView('list'); setSelectedId(null); }}
@@ -4480,7 +4789,7 @@ function CoachApp() {
           {view === 'template-editor' && selectedTemplate && (
             <TemplateEditor
               template={selectedTemplate}
-              exercises={exercises}
+              exercises={exercises.filter(e => !e.owner_id)}
               onSave={saveTemplate}
               onBack={()=>{ setSelectedTemplateId(null); setView('workouts'); }}
             />
