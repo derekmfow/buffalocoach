@@ -732,7 +732,7 @@ function ResendLoginButton({ clientId }) {
 /* =========================================================
    CLIENT DETAIL
    ========================================================= */
-function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onToggleCheckinLock, onSaveMealSuggestion, onDeleteMealSuggestion, onSetStatus, onDelete, onBack }) {
+function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSuggestions, clientProgram, programs, exercises, onAddLog, onAddNote, onUpdateNote, onDeleteNote, onToggleResolveQuestion, onToggleCheckinLock, onSaveMealSuggestion, onDeleteMealSuggestion, onAssignProgram, onUpdateClientProgram, onUnassignProgram, onSwapClientExercise, onSetStatus, onDelete, onBack }) {
   const [tab, setTab] = useState('timeline');
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -817,6 +817,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
             { id:'checkins',  label:'Check-ins',   count:clientCheckins.length },
             { id:'questions', label:'Questions',   count:clientQuestions.length, dot: unresolvedCount > 0 },
             { id:'notes',     label:'Coach Notes', count:clientNotes.length },
+            { id:'workout',   label:'Workout' },
             { id:'actions',   label:'Actions' },
           ].map(t=>(
             <button key={t.id} onClick={()=>setTab(t.id)}
@@ -832,6 +833,7 @@ function ClientDetailView({ client, mealLogs, checkins, notes, questions, mealSu
       {tab==='checkins'  && <CheckinsTab checkins={clientCheckins} onToggleLock={onToggleCheckinLock}/>}
       {tab==='questions' && <QuestionsTab questions={clientQuestions} onToggleResolve={onToggleResolveQuestion}/>}
       {tab==='notes'     && <NotesTab notes={clientNotes} clientId={client.id} onAdd={onAddNote} onUpdate={onUpdateNote} onDelete={onDeleteNote}/>}
+      {tab==='workout'   && <WorkoutCoachTab client={client} clientProgram={clientProgram} programs={programs} exercises={exercises} onAssign={onAssignProgram} onUpdate={onUpdateClientProgram} onUnassign={onUnassignProgram} onSwap={onSwapClientExercise}/>}
       {tab==='actions'   && <ActionsTab client={client} onSetStatus={onSetStatus} onDelete={onDelete}/>}
 
       {uploadOpen && <UploadModal client={client} onClose={()=>setUploadOpen(false)} onSave={(d)=>{ onAddLog(d); setUploadOpen(false); }}/>}
@@ -1362,6 +1364,358 @@ function ActionCard({ title, body, buttonLabel, buttonDisabled, onClick, tone })
           {buttonLabel}
         </button>
       </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   WORKOUT TAB (coach side, per client).
+
+   When no program is assigned: "Assign Program" panel (pick from library + optional coach note).
+   When a program is assigned: editable view of the client's snapshot.
+     - Coach can edit coach_note inline
+     - Per exercise: edit sets / reps / rationale in place, swap exercise
+     - Unassign button + Change Program button (both warn first)
+   Uses SwapExerciseModal (shared with the client side).
+   ========================================================= */
+function WorkoutCoachTab({ client, clientProgram, programs, exercises, onAssign, onUpdate, onUnassign, onSwap }) {
+  if (!clientProgram) {
+    return <AssignProgramPanel client={client} programs={programs} onAssign={onAssign}/>;
+  }
+  return <EditableClientProgram
+    client={client}
+    clientProgram={clientProgram}
+    programs={programs}
+    exercises={exercises}
+    onUpdate={onUpdate}
+    onUnassign={onUnassign}
+    onSwap={onSwap}
+  />;
+}
+
+function AssignProgramPanel({ client, programs, onAssign }) {
+  const [selectedId, setSelectedId] = useState('');
+  const [coachNote, setCoachNote] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!selectedId || busy) return;
+    setBusy(true);
+    try { await onAssign(selectedId, coachNote); }
+    catch (e) { alert('Assign failed: ' + e.message); setBusy(false); }
+  };
+
+  const selected = programs.find(p => p.id === selectedId);
+
+  return (
+    <div className="max-w-2xl">
+      <div className="bg-white border border-neutral-200 rounded p-5 mb-4">
+        <h3 className="font-display font-bold text-2xl leading-tight mb-1">Assign a workout plan</h3>
+        <p className="text-sm text-neutral-600 mb-5">Pick a program from your library. The client gets their own copy — editing the master library later won't affect {client.name.split(' ')[0]}'s plan.</p>
+
+        {programs.length === 0 ? (
+          <div className="text-sm text-neutral-500 italic">Your program library is empty. Build one in the Workouts tab up top, then come back.</div>
+        ) : (
+          <>
+            <Field label="Program">
+              <select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}
+                className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition bg-white">
+                <option value="">— pick one —</option>
+                {programs.map(p => (
+                  <option key={p.id} value={p.id}>{p.name} ({p.days.length} day{p.days.length===1?'':'s'})</option>
+                ))}
+              </select>
+            </Field>
+
+            {selected && (
+              <div className="bg-neutral-50 border border-neutral-200 rounded p-4 my-3 text-sm">
+                {selected.description && <p className="mb-2 text-neutral-800">{selected.description}</p>}
+                <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">DAYS</div>
+                <ul className="list-disc pl-5 text-neutral-700">
+                  {selected.days.map((d, i) => <li key={i}>{d.label}</li>)}
+                </ul>
+              </div>
+            )}
+
+            <Field label="Coach note (optional)" hint="Visible to the client on their Workout screen.">
+              <textarea rows={3} value={coachNote} onChange={(e)=>setCoachNote(e.target.value)}
+                placeholder="e.g. 'Run this 4 weeks. Focus on the lower-body days. We'll re-evaluate and swap to PPL after.'"
+                className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none"/>
+            </Field>
+
+            <button onClick={submit} disabled={!selectedId || busy}
+              className="w-full mt-4 bg-brand-orange hover:bg-brand-orange-dark disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-display font-bold tracking-[0.12em] py-3 rounded transition">
+              {busy ? 'ASSIGNING…' : 'ASSIGN PROGRAM'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EditableClientProgram({ client, clientProgram, programs, exercises, onUpdate, onUnassign, onSwap }) {
+  const [swapFor, setSwapFor] = useState(null);
+  const [expandedDay, setExpandedDay] = useState(0);
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(clientProgram.coach_note || '');
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [showChange, setShowChange] = useState(false);
+
+  const exById = useMemo(() => Object.fromEntries(exercises.map(e => [e.id, e])), [exercises]);
+
+  const saveNote = async () => {
+    setNoteBusy(true);
+    try { await onUpdate({ coach_note: noteDraft }); setEditingNote(false); }
+    catch (e) { alert('Failed: ' + e.message); }
+    finally { setNoteBusy(false); }
+  };
+
+  // Inline edit of one exercise's sets/reps/rest/rationale. Rewrites the full days array.
+  const updateExercise = async (dayIndex, exerciseIndex, patch) => {
+    const newDays = clientProgram.days.map((d, di) => {
+      if (di !== dayIndex) return d;
+      return {
+        ...d,
+        exercises: d.exercises.map((e, ei) => ei === exerciseIndex ? { ...e, ...patch } : e),
+      };
+    });
+    await onUpdate({ days: newDays });
+  };
+
+  const changeProgram = async (newBaseProgramId) => {
+    if (!confirm('Switching programs will discard any customizations (exercise swaps, sets/reps overrides) on the current plan. Continue?')) return;
+    try { await onUpdate({ __change_to: newBaseProgramId }); setShowChange(false); }
+    catch (e) { alert('Swap failed: ' + e.message); }
+  };
+
+  const doUnassign = async () => {
+    if (!confirm(`Unassign this program from ${client.name}? They won't see any workout until you assign a new one.`)) return;
+    try { await onUnassign(); }
+    catch (e) { alert('Unassign failed: ' + e.message); }
+  };
+
+  return (
+    <div className="max-w-3xl">
+      <div className="bg-white border border-neutral-200 rounded p-5 mb-4">
+        <div className="flex items-start justify-between gap-3 mb-1">
+          <div className="min-w-0">
+            <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange">ASSIGNED PROGRAM</div>
+            <h2 className="font-display font-bold text-2xl leading-tight">{clientProgram.name}</h2>
+          </div>
+          <div className="flex gap-2 flex-shrink-0">
+            <button onClick={()=>setShowChange(!showChange)}
+              className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition">
+              CHANGE
+            </button>
+            <button onClick={doUnassign}
+              className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50 transition">
+              UNASSIGN
+            </button>
+          </div>
+        </div>
+        {clientProgram.description && <p className="text-sm text-neutral-600 mt-2 leading-relaxed">{clientProgram.description}</p>}
+
+        {showChange && (
+          <div className="mt-4 pt-4 border-t border-neutral-100">
+            <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-2">SWITCH TO</div>
+            <div className="space-y-1">
+              {programs.filter(p => p.id !== clientProgram.base_program_id).map(p => (
+                <button key={p.id} onClick={()=>changeProgram(p.id)}
+                  className="w-full text-left px-3 py-2.5 rounded border border-neutral-200 hover:border-brand-orange hover:bg-brand-orange/5 transition">
+                  <div className="font-display font-bold text-base leading-tight">{p.name}</div>
+                  <div className="text-xs text-neutral-500">{p.days.length} day{p.days.length===1?'':'s'} · {p.description}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Coach note */}
+      <div className="bg-brand-orange/5 border border-brand-orange/30 rounded p-4 mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange">NOTE TO CLIENT</div>
+          {!editingNote && (
+            <button onClick={()=>{ setNoteDraft(clientProgram.coach_note || ''); setEditingNote(true); }}
+              className="font-display font-bold tracking-[0.1em] text-[10px] text-neutral-500 hover:text-brand-orange transition">
+              EDIT
+            </button>
+          )}
+        </div>
+        {editingNote ? (
+          <>
+            <textarea rows={3} value={noteDraft} onChange={(e)=>setNoteDraft(e.target.value)}
+              className="w-full border border-neutral-200 rounded px-3 py-2.5 focus:border-brand-orange transition resize-none text-sm mb-2"/>
+            <div className="flex gap-2">
+              <button onClick={()=>setEditingNote(false)} disabled={noteBusy}
+                className="font-display font-bold tracking-[0.1em] text-[11px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
+                CANCEL
+              </button>
+              <button onClick={saveNote} disabled={noteBusy}
+                className="font-display font-bold tracking-[0.1em] text-[11px] px-4 py-1.5 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition disabled:opacity-60">
+                {noteBusy ? 'SAVING…' : 'SAVE'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-neutral-800 leading-relaxed whitespace-pre-wrap">
+            {clientProgram.coach_note || <span className="text-neutral-400 italic">No note yet.</span>}
+          </p>
+        )}
+      </div>
+
+      {/* Days + exercises with inline editing */}
+      <div className="space-y-2">
+        {clientProgram.days.map((day, di) => {
+          const isOpen = expandedDay === di;
+          return (
+            <div key={di} className={`bg-white border rounded overflow-hidden transition ${isOpen ? 'border-brand-orange' : 'border-neutral-200'}`}>
+              <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
+                className="w-full text-left px-4 py-3 flex items-center justify-between gap-3 hover:bg-neutral-50 transition">
+                <div className="flex items-baseline gap-3 min-w-0">
+                  <div className="font-display font-bold text-2xl leading-none text-brand-orange flex-shrink-0">D{di+1}</div>
+                  <div className="min-w-0">
+                    <div className="font-display font-bold text-lg leading-tight">{day.label}</div>
+                    <div className="text-xs text-neutral-500">{day.exercises.length} exercise{day.exercises.length===1?'':'s'}</div>
+                  </div>
+                </div>
+                <div className={`text-neutral-400 transition-transform flex-shrink-0 ${isOpen ? 'rotate-90' : ''}`}>›</div>
+              </button>
+
+              {isOpen && (
+                <div className="border-t border-neutral-100 divide-y divide-neutral-100">
+                  {day.exercises.map((slot, ei) => (
+                    <CoachEditableExerciseRow
+                      key={ei}
+                      index={ei+1}
+                      slot={slot}
+                      exercise={exById[slot.exercise_id]}
+                      onEdit={(patch)=>updateExercise(di, ei, patch)}
+                      onSwap={()=>setSwapFor({ dayIndex: di, exerciseIndex: ei, currentExercise: exById[slot.exercise_id] })}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {swapFor && (
+        <SwapExerciseModal
+          current={swapFor.currentExercise}
+          exercises={exercises}
+          onSelect={async (newId) => {
+            try {
+              await onSwap(swapFor.dayIndex, swapFor.exerciseIndex, newId);
+              setSwapFor(null);
+            } catch (e) { alert('Swap failed: ' + e.message); }
+          }}
+          onClose={()=>setSwapFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// One exercise row with inline edit for sets/reps/rest/rationale. Kept simple:
+// click EDIT → inputs appear → SAVE to commit.
+function CoachEditableExerciseRow({ index, slot, exercise, onEdit, onSwap }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(slot);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await onEdit({
+        sets:         draft.sets,
+        reps:         draft.reps,
+        rest_seconds: draft.rest_seconds === '' || draft.rest_seconds == null ? null : Number(draft.rest_seconds),
+        rationale:    draft.rationale || '',
+      });
+      setEditing(false);
+    } catch (e) { alert('Failed: ' + e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="px-4 py-4">
+      <div className="flex items-start gap-3 mb-2">
+        <div className="font-display font-bold text-xl w-6 text-center leading-none text-neutral-400 flex-shrink-0 pt-0.5">{index}</div>
+        <div className="flex-1 min-w-0">
+          <div className="font-display font-bold text-base leading-tight mb-0.5">
+            {exercise ? exercise.name : <span className="text-neutral-400 italic">exercise removed</span>}
+          </div>
+          {exercise && (
+            <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase">
+              {exercise.muscle_group} · {exercise.category}
+            </div>
+          )}
+        </div>
+        <div className="flex gap-1 flex-shrink-0">
+          {!editing && (
+            <button onClick={()=>{ setDraft(slot); setEditing(true); }}
+              className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-black hover:text-brand-black transition">
+              EDIT
+            </button>
+          )}
+          <button onClick={onSwap}
+            className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition">
+            SWAP
+          </button>
+        </div>
+      </div>
+
+      {editing ? (
+        <div className="pl-9 space-y-2">
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">SETS</label>
+              <input type="number" value={draft.sets} onChange={(e)=>setDraft({...draft, sets:Number(e.target.value)||0})}
+                className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition"/>
+            </div>
+            <div>
+              <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">REPS</label>
+              <input type="text" value={draft.reps} onChange={(e)=>setDraft({...draft, reps:e.target.value})}
+                placeholder="e.g. 8-12"
+                className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition"/>
+            </div>
+            <div>
+              <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">REST (SEC)</label>
+              <input type="number" value={draft.rest_seconds ?? ''} onChange={(e)=>setDraft({...draft, rest_seconds:e.target.value})}
+                className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition"/>
+            </div>
+          </div>
+          <div>
+            <label className="font-display font-bold tracking-[0.1em] text-[9px] text-neutral-500 block mb-0.5">RATIONALE</label>
+            <textarea rows={2} value={draft.rationale || ''} onChange={(e)=>setDraft({...draft, rationale:e.target.value})}
+              className="w-full border border-neutral-200 rounded px-2 py-1.5 text-sm focus:border-brand-orange transition resize-none"/>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={()=>setEditing(false)} disabled={busy}
+              className="font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100 transition disabled:opacity-60">
+              CANCEL
+            </button>
+            <button onClick={save} disabled={busy}
+              className="font-display font-bold tracking-[0.1em] text-[10px] px-4 py-1.5 rounded bg-brand-orange hover:bg-brand-orange-dark text-white transition disabled:opacity-60">
+              {busy ? 'SAVING…' : 'SAVE'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-3 text-sm mb-2 pl-9">
+            <div><span className="text-neutral-500">Sets:</span> <strong>{slot.sets}</strong></div>
+            <div><span className="text-neutral-500">Reps:</span> <strong>{slot.reps}</strong></div>
+            <div><span className="text-neutral-500">Rest:</span> <strong>{slot.rest_seconds != null ? slot.rest_seconds + 's' : '—'}</strong></div>
+          </div>
+          {slot.rationale && (
+            <p className="text-sm text-neutral-700 leading-relaxed pl-9 italic">{slot.rationale}</p>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2791,9 +3145,10 @@ function weekForLogDate(logDate, startDate) {
 }
 
 /* ---------- HOME ---------- */
-function ClientHome({ client, firstName, week, mealLogs, checkins, onGo }) {
+function ClientHome({ client, firstName, week, mealLogs, checkins, clientProgram, onGo }) {
   const lastUploadDays = daysSinceLastUpload(mealLogs);
   const currentWeekCheckinDone = checkins.some(c => c.week_number === week);
+  const programDayCount = clientProgram?.days?.length || 0;
 
   return (
     <div className="px-4 sm:px-6 py-6">
@@ -2827,6 +3182,18 @@ function ClientHome({ client, firstName, week, mealLogs, checkins, onGo }) {
         <div className="font-display font-bold tracking-[0.2em] text-[10px] text-white/80 mb-1">DAILY</div>
         <div className="font-display font-bold text-3xl leading-none mb-2">Upload Meals</div>
         <div className="text-white/90 text-sm">Photos of what you ate. Up to 5 per day.</div>
+      </button>
+
+      {/* MY WORKOUT — reference they'll open often */}
+      <button onClick={()=>onGo('workout')}
+        className="w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-5 mb-3 text-left transition active:scale-[0.99]">
+        <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">TRAINING</div>
+        <div className="font-display font-bold text-2xl leading-tight mb-1">My Workout</div>
+        <div className="text-neutral-600 text-sm">
+          {clientProgram
+            ? `${clientProgram.name} · ${programDayCount} day${programDayCount===1?'':'s'} in rotation`
+            : "No plan assigned yet — text Derek to get started"}
+        </div>
       </button>
 
       {/* SECONDARY ACTIONS */}
@@ -3308,8 +3675,214 @@ function ClientTimelineLog({ log, clientId, suggestion }) {
   );
 }
 
+/* ---------- WORKOUT ---------- */
+function ClientWorkoutView({ clientProgram, exercises, onSwap, onBack }) {
+  // Swap modal state. When set, stores { dayIndex, exerciseIndex, currentExercise } identifying the slot being swapped.
+  const [swapFor, setSwapFor] = useState(null);
+  const [expandedDay, setExpandedDay] = useState(0); // first day open by default
+
+  // Map for fast lookup. Exercises should always come from the current library,
+  // so renames and notes stay fresh even for snapshotted programs.
+  const exById = useMemo(() => Object.fromEntries(exercises.map(e => [e.id, e])), [exercises]);
+
+  if (!clientProgram) {
+    return (
+      <div className="px-4 sm:px-6 py-6">
+        <BackLink onClick={onBack}/>
+        <h1 className="font-display font-bold text-4xl leading-none mb-1">My Workout</h1>
+        <p className="text-neutral-600 text-sm mb-6">Your training plan will live here.</p>
+        <div className="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center">
+          <p className="text-neutral-800 mb-2">No plan assigned yet.</p>
+          <p className="text-neutral-500 text-sm">Text Derek and he'll put one together for you.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const fmtRest = (s) => {
+    if (!s && s !== 0) return '—';
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), rem = s % 60;
+    return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+  };
+
+  const openSwap = (dayIndex, exerciseIndex) => {
+    const slot = clientProgram.days[dayIndex].exercises[exerciseIndex];
+    const current = exById[slot.exercise_id];
+    setSwapFor({ dayIndex, exerciseIndex, currentExercise: current });
+  };
+
+  const doSwap = async (newExerciseId) => {
+    if (!swapFor) return;
+    try {
+      await onSwap(swapFor.dayIndex, swapFor.exerciseIndex, newExerciseId);
+      setSwapFor(null);
+    } catch (e) {
+      alert('Swap failed: ' + e.message);
+    }
+  };
+
+  return (
+    <div className="px-4 sm:px-6 py-6">
+      <BackLink onClick={onBack}/>
+      <div className="font-display font-bold tracking-[0.2em] text-[10px] text-brand-orange mb-2">YOUR PLAN</div>
+      <h1 className="font-display font-bold text-4xl leading-none mb-2">{clientProgram.name}</h1>
+      {clientProgram.description && (
+        <p className="text-neutral-600 text-sm mb-4 leading-relaxed">{clientProgram.description}</p>
+      )}
+
+      {clientProgram.coach_note && (
+        <div className="bg-brand-orange/5 border border-brand-orange/30 rounded-lg p-4 mb-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-brand-orange mb-1">NOTE FROM DEREK</div>
+          <p className="text-neutral-800 leading-relaxed text-sm whitespace-pre-wrap">{clientProgram.coach_note}</p>
+        </div>
+      )}
+
+      {clientProgram.notes && (
+        <div className="bg-white border border-neutral-200 rounded-lg p-4 mb-4">
+          <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">HOW TO RUN THIS</div>
+          <p className="text-neutral-700 leading-relaxed text-sm whitespace-pre-wrap">{clientProgram.notes}</p>
+        </div>
+      )}
+
+      <div className="space-y-2 mb-6">
+        {clientProgram.days.map((day, di) => {
+          const isOpen = expandedDay === di;
+          return (
+            <div key={di} className={`bg-white border rounded-lg overflow-hidden transition ${isOpen ? 'border-brand-orange' : 'border-neutral-200'}`}>
+              <button onClick={()=>setExpandedDay(isOpen ? -1 : di)}
+                className="w-full text-left px-4 py-3 flex items-center justify-between gap-3 hover:bg-neutral-50 transition">
+                <div className="flex items-baseline gap-3 min-w-0">
+                  <div className="font-display font-bold text-2xl leading-none text-brand-orange flex-shrink-0">D{di+1}</div>
+                  <div className="min-w-0">
+                    <div className="font-display font-bold text-lg leading-tight">{day.label}</div>
+                    <div className="text-xs text-neutral-500">{day.exercises.length} exercise{day.exercises.length===1?'':'s'}</div>
+                  </div>
+                </div>
+                <div className={`text-neutral-400 transition-transform flex-shrink-0 ${isOpen ? 'rotate-90' : ''}`}>›</div>
+              </button>
+
+              {isOpen && (
+                <div className="border-t border-neutral-100 divide-y divide-neutral-100">
+                  {day.exercises.map((slot, ei) => {
+                    const ex = exById[slot.exercise_id];
+                    return (
+                      <div key={ei} className="px-4 py-4">
+                        <div className="flex items-start gap-3 mb-2">
+                          <div className="font-display font-bold text-xl w-6 text-center leading-none text-neutral-400 flex-shrink-0 pt-0.5">{ei+1}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-display font-bold text-base leading-tight mb-0.5">
+                              {ex ? ex.name : <span className="text-neutral-400 italic">exercise removed</span>}
+                            </div>
+                            {ex && (
+                              <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase">
+                                {ex.muscle_group} · {ex.category}
+                              </div>
+                            )}
+                          </div>
+                          <button onClick={()=>openSwap(di, ei)}
+                            className="font-display font-bold tracking-[0.1em] text-[10px] px-2.5 py-1 rounded border border-neutral-300 text-neutral-600 hover:border-brand-orange hover:text-brand-orange transition flex-shrink-0">
+                            SWAP
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap gap-3 text-sm mb-2 pl-9">
+                          <div><span className="text-neutral-500">Sets:</span> <strong>{slot.sets}</strong></div>
+                          <div><span className="text-neutral-500">Reps:</span> <strong>{slot.reps}</strong></div>
+                          <div><span className="text-neutral-500">Rest:</span> <strong>{fmtRest(slot.rest_seconds)}</strong></div>
+                        </div>
+
+                        {slot.rationale && (
+                          <p className="text-sm text-neutral-700 leading-relaxed pl-9 italic">{slot.rationale}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {swapFor && (
+        <SwapExerciseModal
+          current={swapFor.currentExercise}
+          exercises={exercises}
+          onSelect={doSwap}
+          onClose={()=>setSwapFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Modal for swapping an exercise. Filters alternatives by the current exercise's
+// muscle group so clients can't accidentally swap a bench press for a leg curl.
+function SwapExerciseModal({ current, exercises, onSelect, onClose }) {
+  const [filter, setFilter] = useState('same'); // 'same' | 'all'
+
+  // Default: same muscle group, excluding current
+  const alternatives = exercises
+    .filter(e => e.id !== current?.id)
+    .filter(e => filter === 'all' || (current && e.muscle_group === current.muscle_group))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60"
+         onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg max-h-[85vh] overflow-hidden flex flex-col"
+           onClick={(e)=>e.stopPropagation()}>
+        <div className="p-5 border-b border-neutral-200">
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <div>
+              <div className="font-display font-bold tracking-[0.12em] text-[10px] text-neutral-500 mb-1">SWAPPING</div>
+              <div className="font-display font-bold text-xl leading-tight">{current?.name || 'this exercise'}</div>
+              {current && <div className="text-xs text-neutral-500 mt-0.5">{current.muscle_group} · {current.category}</div>}
+            </div>
+            <button onClick={onClose} className="text-neutral-400 hover:text-brand-black text-2xl leading-none">×</button>
+          </div>
+          <div className="flex gap-1 mt-3">
+            <button onClick={()=>setFilter('same')}
+              className={`font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded transition ${
+                filter==='same' ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+              }`}>
+              SAME MUSCLE GROUP
+            </button>
+            <button onClick={()=>setFilter('all')}
+              className={`font-display font-bold tracking-[0.1em] text-[10px] px-3 py-1.5 rounded transition ${
+                filter==='all' ? 'bg-brand-black text-white' : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+              }`}>
+              ALL EXERCISES
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3">
+          {alternatives.length === 0 ? (
+            <p className="text-center text-neutral-500 text-sm py-8">No other exercises in this muscle group. Try "All exercises".</p>
+          ) : (
+            <div className="space-y-1">
+              {alternatives.map(ex => (
+                <button key={ex.id} onClick={()=>onSelect(ex.id)}
+                  className="w-full text-left px-3 py-3 rounded hover:bg-brand-orange/5 hover:border-brand-orange border border-transparent transition">
+                  <div className="font-display font-bold text-base leading-tight">{ex.name}</div>
+                  <div className="text-[10px] font-display font-bold tracking-[0.1em] text-neutral-500 uppercase mb-1">
+                    {ex.muscle_group} · {ex.category}
+                  </div>
+                  {ex.notes && <div className="text-xs text-neutral-600 leading-snug">{ex.notes}</div>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- ROUTER ---------- */
-function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, onAddMealLog, onSaveCheckin, onPostQuestion, onLogout }) {
+function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, clientProgram, exercises, onAddMealLog, onSaveCheckin, onPostQuestion, onSwapExercise, onLogout }) {
   const [view, setView] = useState('home');
   const goHome = () => setView('home');
   const firstName = client.name.split(/\s+/)[0] || client.name;
@@ -3319,11 +3892,12 @@ function ClientApp({ client, mealLogs, checkins, questions, mealSuggestions, onA
     <div className="min-h-screen bg-neutral-50">
       <ClientHeader onLogout={onLogout} onHome={goHome}/>
       <div className="max-w-3xl mx-auto">
-        {view === 'home'      && <ClientHome client={client} firstName={firstName} week={week} mealLogs={mealLogs} checkins={checkins} onGo={setView}/>}
+        {view === 'home'      && <ClientHome client={client} firstName={firstName} week={week} mealLogs={mealLogs} checkins={checkins} clientProgram={clientProgram} onGo={setView}/>}
         {view === 'upload'    && <ClientUploadView    onBack={goHome} onSaved={onAddMealLog}/>}
         {view === 'checkin'   && <ClientCheckinView   client={client} checkins={checkins} onSave={onSaveCheckin} onBack={goHome}/>}
         {view === 'questions' && <ClientQuestionsView questions={questions} onPost={onPostQuestion} onBack={goHome}/>}
         {view === 'timeline'  && <ClientTimelineView  client={client} mealLogs={mealLogs} checkins={checkins} mealSuggestions={mealSuggestions} onBack={goHome}/>}
+        {view === 'workout'   && <ClientWorkoutView   clientProgram={clientProgram} exercises={exercises} onSwap={onSwapExercise} onBack={goHome}/>}
       </div>
     </div>
   );
@@ -3338,6 +3912,8 @@ function ClientRoot() {
   const [checkins, setCheckins]               = useState([]);
   const [questions, setQuestions]             = useState([]);
   const [mealSuggestions, setMealSuggestions] = useState([]);
+  const [exercises, setExercises]             = useState([]);
+  const [clientProgram, setClientProgram]     = useState(null);
 
   useEffect(() => {
     api.get('/api/me')
@@ -3350,13 +3926,16 @@ function ClientRoot() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [logs, cks, qs, sugs] = await Promise.all([
+      const [logs, cks, qs, sugs, exs, prog] = await Promise.all([
         api.get('/api/meal-logs'),
         api.get('/api/checkins'),
         api.get('/api/questions'),
         api.get('/api/meal-suggestions'),
+        api.get('/api/exercises'),
+        api.get('/api/client-programs'),   // returns null if unassigned
       ]);
       setMealLogs(logs); setCheckins(cks); setQuestions(qs); setMealSuggestions(sugs);
+      setExercises(exs); setClientProgram(prog);
     } catch (e) {
       console.error('[client] load failed:', e);
     }
@@ -3368,6 +3947,7 @@ function ClientRoot() {
     try { await api.post('/api/logout'); } catch {}
     setState({ loading: false, client: null });
     setMealLogs([]); setCheckins([]); setQuestions([]); setMealSuggestions([]);
+    setExercises([]); setClientProgram(null);
   };
 
   // ---- Write handlers — optimistic state updates ----
@@ -3389,6 +3969,15 @@ function ClientRoot() {
     return saved;
   };
 
+  const swapExercise = async (dayIndex, exerciseIndex, newExerciseId) => {
+    if (!clientProgram) throw new Error('no program assigned');
+    const updated = await api.post(`/api/client-programs/${clientProgram.id}/swap-exercise`, {
+      day_index: dayIndex, exercise_index: exerciseIndex, new_exercise_id: newExerciseId,
+    });
+    setClientProgram(updated);
+    return updated;
+  };
+
   if (state.loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-brand-black">
@@ -3406,9 +3995,12 @@ function ClientRoot() {
       checkins={checkins}
       questions={questions}
       mealSuggestions={mealSuggestions}
+      clientProgram={clientProgram}
+      exercises={exercises}
       onAddMealLog={addMealLog}
       onSaveCheckin={saveCheckin}
       onPostQuestion={postQuestion}
+      onSwapExercise={swapExercise}
       onLogout={logout}
     />
   );
@@ -3449,6 +4041,7 @@ function CoachApp() {
   const [programs, setPrograms]   = useState([]);
   const [mealSuggestions, setMealSuggestions] = useState([]);
   const [leads, setLeads]         = useState([]);
+  const [clientPrograms, setClientPrograms] = useState([]);
   const [leadToConvert, setLeadToConvert] = useState(null); // when set, AddClientModal opens pre-filled
   const [dataLoading, setDataLoading] = useState(false);
 
@@ -3470,7 +4063,7 @@ function CoachApp() {
   const loadAll = useCallback(async () => {
     setDataLoading(true);
     try {
-      const [c, l, k, n, q, e, t, p, s, ld] = await Promise.all([
+      const [c, l, k, n, q, e, t, p, s, ld, cp] = await Promise.all([
         api.get('/api/clients'),
         api.get('/api/meal-logs'),
         api.get('/api/checkins'),
@@ -3481,10 +4074,11 @@ function CoachApp() {
         api.get('/api/programs'),
         api.get('/api/meal-suggestions'),
         api.get('/api/leads'),
+        api.get('/api/client-programs'),
       ]);
       setClients(c); setMealLogs(l); setCheckins(k); setNotes(n); setQuestions(q);
       setExercises(e); setTemplates(t); setPrograms(p); setMealSuggestions(s);
-      setLeads(ld);
+      setLeads(ld); setClientPrograms(cp);
     } catch (err) {
       console.error('Failed to load data:', err);
       alert('Failed to load data: ' + err.message);
@@ -3553,6 +4147,7 @@ function CoachApp() {
     setCheckins(prev => prev.filter(c => c.client_id !== id));
     setNotes(prev => prev.filter(n => n.client_id !== id));
     setQuestions(prev => prev.filter(q => q.client_id !== id));
+    setClientPrograms(prev => prev.filter(p => p.client_id !== id));
     // Navigate back to list — the detail view's client just went away
     setView('list');
     setSelectedId(null);
@@ -3564,6 +4159,58 @@ function CoachApp() {
       const updated = await api.patch('/api/checkins/' + id + '/lock', { is_locked: isLocked });
       setCheckins(prev => prev.map(c => c.id === id ? updated : c));
     } catch (e) { alert('Failed to toggle check-in lock: ' + e.message); }
+  };
+
+  // ---- Client programs (per-client assigned workout) ----
+  // `clientPrograms` is keyed by client_id (one program per client max).
+  const replaceOrInsertClientProgram = (cp) => {
+    setClientPrograms(prev => {
+      const others = prev.filter(p => p.client_id !== cp.client_id);
+      return [cp, ...others];
+    });
+  };
+
+  const assignClientProgram = async (clientId, baseProgramId, coachNote) => {
+    const saved = await api.post('/api/client-programs', {
+      client_id: clientId, base_program_id: baseProgramId, coach_note: coachNote,
+    });
+    replaceOrInsertClientProgram(saved);
+  };
+
+  // Accepts a patch object. Special case: { __change_to: baseProgramId } reassigns
+  // the program (replaces the snapshot). Anything else is a regular PATCH.
+  const updateClientProgram = async (clientId, patch) => {
+    const existing = clientPrograms.find(p => p.client_id === clientId);
+    if (!existing) throw new Error('no program assigned');
+    if (patch.__change_to) {
+      // Reassign = POST, which replaces the existing row
+      const saved = await api.post('/api/client-programs', {
+        client_id: clientId, base_program_id: patch.__change_to, coach_note: existing.coach_note,
+      });
+      replaceOrInsertClientProgram(saved);
+      return saved;
+    }
+    const saved = await api.patch('/api/client-programs/' + existing.id, patch);
+    replaceOrInsertClientProgram(saved);
+    return saved;
+  };
+
+  const unassignClientProgram = async (clientId) => {
+    const existing = clientPrograms.find(p => p.client_id === clientId);
+    if (!existing) return;
+    await api.del('/api/client-programs/' + existing.id);
+    setClientPrograms(prev => prev.filter(p => p.client_id !== clientId));
+  };
+
+  // Coach-side exercise swap — same endpoint as the client's, just called from the coach tab.
+  const swapClientExercise = async (clientId, dayIndex, exerciseIndex, newExerciseId) => {
+    const existing = clientPrograms.find(p => p.client_id === clientId);
+    if (!existing) throw new Error('no program assigned');
+    const saved = await api.post(`/api/client-programs/${existing.id}/swap-exercise`, {
+      day_index: dayIndex, exercise_index: exerciseIndex, new_exercise_id: newExerciseId,
+    });
+    replaceOrInsertClientProgram(saved);
+    return saved;
   };
 
   // ---- Leads ----
@@ -3711,6 +4358,7 @@ function CoachApp() {
     setClients([]); setMealLogs([]); setCheckins([]); setNotes([]); setQuestions([]);
     setExercises([]); setTemplates([]); setPrograms([]); setMealSuggestions([]);
     setLeads([]);
+    setClientPrograms([]);
   };
 
   const selectedClient   = clients.find(c => c.id === selectedId);
@@ -3780,6 +4428,9 @@ function CoachApp() {
               notes={notes}
               questions={questions}
               mealSuggestions={mealSuggestions}
+              clientProgram={clientPrograms.find(p => p.client_id === selectedClient.id) || null}
+              programs={programs}
+              exercises={exercises}
               onAddLog={addLog}
               onAddNote={addNote}
               onUpdateNote={updateNote}
@@ -3788,6 +4439,10 @@ function CoachApp() {
               onToggleCheckinLock={toggleCheckinLock}
               onSaveMealSuggestion={saveMealSuggestion}
               onDeleteMealSuggestion={deleteMealSuggestion}
+              onAssignProgram={(baseId, note)=>assignClientProgram(selectedClient.id, baseId, note)}
+              onUpdateClientProgram={(patch)=>updateClientProgram(selectedClient.id, patch)}
+              onUnassignProgram={()=>unassignClientProgram(selectedClient.id)}
+              onSwapClientExercise={(di, ei, newId)=>swapClientExercise(selectedClient.id, di, ei, newId)}
               onSetStatus={setClientStatus}
               onDelete={deleteClient}
               onBack={()=>{ setView('list'); setSelectedId(null); }}
