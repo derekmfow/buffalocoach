@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS weekly_checkins (
   hunger_1_10   INTEGER,
   wins          TEXT DEFAULT '',
   struggles     TEXT DEFAULT '',
+  is_locked     INTEGER NOT NULL DEFAULT 0,  -- 1 when coach locks the week; client can't edit past this
   created_at    TEXT NOT NULL,
   FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
   UNIQUE (client_id, week_number)
@@ -131,6 +132,21 @@ CREATE TABLE IF NOT EXISTS leads (
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status_created ON leads(status, created_at DESC);
 `);
+
+// ============================================================
+// MIGRATIONS (idempotent — safe to run every boot)
+//
+// CREATE TABLE IF NOT EXISTS doesn't add new columns to existing tables,
+// so for any additive schema change that needs to reach already-deployed
+// databases, use the "check PRAGMA, ALTER if missing" pattern here.
+// ============================================================
+(() => {
+  const checkinCols = db.prepare("PRAGMA table_info(weekly_checkins)").all().map(c => c.name);
+  if (!checkinCols.includes('is_locked')) {
+    console.log('[db] Migration: adding is_locked column to weekly_checkins');
+    db.exec('ALTER TABLE weekly_checkins ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0');
+  }
+})();
 
 // ============================================================
 // FIRST-RUN SEEDING (exercises + programs only — never touches client data)
