@@ -115,6 +115,21 @@ CREATE TABLE IF NOT EXISTS meal_suggestions (
   created_at    TEXT NOT NULL,
   FOREIGN KEY (meal_log_id) REFERENCES meal_logs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS leads (
+  id                     TEXT PRIMARY KEY,
+  name                   TEXT NOT NULL,
+  email                  TEXT NOT NULL,
+  phone                  TEXT DEFAULT '',
+  message                TEXT DEFAULT '',
+  source                 TEXT DEFAULT 'ham_app',   -- ham_app | direct | other
+  status                 TEXT NOT NULL DEFAULT 'new',  -- new | contacted | converted | archived
+  coach_notes            TEXT DEFAULT '',          -- private notes from coach while working the lead
+  converted_to_client_id TEXT,                     -- FK to clients if status='converted'
+  created_at             TEXT NOT NULL,            -- full ISO timestamp, not just date — inquiries are time-sensitive
+  FOREIGN KEY (converted_to_client_id) REFERENCES clients(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_leads_status_created ON leads(status, created_at DESC);
 `);
 
 // ============================================================
