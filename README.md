@@ -5,7 +5,9 @@ Web app for managing 1:1 coaching clients: meal photo review, weekly check-ins, 
 - **Single Express server** — `server.js`
 - **SQLite database** — one file on a persistent disk
 - **React frontend** — single HTML file served as a static asset (no build step)
-- **Coach-only authentication** for Phase 1; client auth wired in but UI comes in Phase 2
+- **Two front-door paths:** `/` for the coach dashboard, `/client` for client login
+- **Automated onboarding:** welcome email with login URL + PIN sent when a client is created (via Resend)
+- **Public inquiry capture:** `/api/inquiries` receives leads from the HAM app CTA; coach works them in the LEADS tab
 
 ---
 
@@ -15,6 +17,8 @@ Web app for managing 1:1 coaching clients: meal photo review, weekly check-ins, 
 .
 ├── server.js           Express app — all API endpoints, auth, photo uploads
 ├── db.js               SQLite schema + first-run seeding of exercise library
+├── email.js            Shared Resend wrapper (welcome emails + backup attachments)
+├── backup.js           Nightly DB + photo backups, emailed via Resend
 ├── package.json
 ├── public/
 │   └── index.html      React app (all-in-one, no build step)
@@ -71,18 +75,39 @@ git push -u origin main
 
 ### 4. Set environment variables
 
-Go to **Environment → Environment Variables** on the service. Add these three:
+Go to **Environment → Environment Variables** on the service. Add the required ones; the optional ones unlock email delivery and nightly backups.
+
+**Required — won't boot without these:**
 
 | Key              | Value                                                                                       |
 |------------------|---------------------------------------------------------------------------------------------|
-| `SESSION_SECRET` | A long random string. Generate one with `openssl rand -hex 32` locally and paste the result. |
+| `SESSION_SECRET` | A long random string. Generate with `openssl rand -hex 32` locally and paste the result. |
 | `ADMIN_PIN`      | Your 4–8 digit coach login PIN. Pick something you'll remember but nobody else will guess. |
 | `DB_PATH`        | `/data/app.db`                                                                              |
 | `UPLOAD_ROOT`    | `/data/uploads`                                                                             |
 | `SESSIONS_PATH`  | `/data/sessions`                                                                            |
 | `NODE_ENV`       | `production`                                                                                |
 
+**Optional — needed for automated welcome emails when you create a client:**
+
+| Key              | Value                                                                                       |
+|------------------|---------------------------------------------------------------------------------------------|
+| `RESEND_API_KEY` | Your Resend API key (free tier = 3,000 emails/mo). Get one at resend.com. |
+| `FROM_EMAIL`     | Sender address, e.g. `Derek <derek@thebuffalomethod.com>`. The domain must be verified in Resend. |
+| `APP_URL`        | Base URL of this app (e.g. `https://buffalocoach.onrender.com` or your custom domain). Used to build the login link in the welcome email. Defaults to the Render URL if unset. |
+
+**Optional — enables nightly DB + photo backups emailed to you:**
+
+| Key                  | Value                                                                                       |
+|----------------------|---------------------------------------------------------------------------------------------|
+| `BACKUP_EMAIL`       | Where backups get sent (your personal email).                                               |
+| `BACKUP_FROM_EMAIL`  | Sender address for backup emails. Can be the same as `FROM_EMAIL`. If `FROM_EMAIL` is unset, this value doubles as the welcome-email sender. |
+
 Save. Render will redeploy automatically.
+
+**Behavior without the optional vars:**
+- No `RESEND_API_KEY` / no sender address → welcome emails silently skip; the Add Client modal surfaces an "email didn't send" warning so you know to fall back to manual PIN delivery.
+- No `BACKUP_*` vars → nightly backup scheduler doesn't start (logged at boot).
 
 ### 5. Verify it's working
 
@@ -121,42 +146,35 @@ Local data lives in `./data/` (ignored by Git). Delete that folder to start fres
 ## Adding your first client
 
 1. Log in as coach.
-2. Click **Add Client**.
-3. Fill in name, email, start date, and a 4-digit PIN. Write the PIN down somewhere safe — after you create the client, you won't see it again (PINs are bcrypt-hashed in the database).
-4. Send the client their email + PIN manually (text, DM, whatever). The client login flow is wired on the backend but the client-side UI comes in Phase 2.
+2. Click **Add Client** (or convert a Lead — same flow).
+3. Fill in name, email, start date, and a 4-digit PIN.
+4. Submit. Two things happen:
+   - Client record is created.
+   - A welcome email goes out to them with the login URL (`/client`), their email, and their PIN.
+5. If the email fails (misconfigured Resend, bad sender domain, etc.), you'll get a dialog telling you why — fall back to texting the PIN manually.
 
-### Resetting a client's PIN
+### Resetting a client's PIN (or resending a lost welcome email)
 
-If a client forgets their PIN, there's no built-in UI for this yet. Two options:
+Open the client's detail page. In the header next to their start date, click **RESEND LOGIN**. This:
+- Generates a brand-new 4-digit PIN (invalidating the old one).
+- Emails a fresh welcome message to the client with the new PIN.
+- Shows you the new PIN inline so you can text it as a fallback if the email didn't deliver.
 
-**Option 1 — SQL directly** (for now, via Render shell):
-```bash
-# In a Render shell for the service:
-node -e "
-const bcrypt = require('bcryptjs');
-const db = require('./db');
-const newPin = '1234';  // whatever you want
-const hash = bcrypt.hashSync(newPin, 10);
-db.prepare('UPDATE clients SET pin_hash = ? WHERE email = ?').run(hash, 'client@example.com');
-console.log('PIN reset to', newPin);
-"
-```
-
-**Option 2 — add to the UI later** (recommended for v1.1): a "Reset PIN" button in the client list that generates and shows a new PIN once.
+No SQL or shell access required. The endpoint is `POST /api/clients/:id/resend-welcome`.
 
 ---
 
-## What's next (Phase 2 + 3)
+## What's next (Phase 3)
 
-The server already supports these — only the frontend UI is missing:
+Phase 2 ships: client login at `/client`, automated welcome email, and a minimal post-login landing that shows program week, start date, status, and goals.
 
-- **Client login screen** — `/client` route with email + PIN form
-- **Client home** — shows their current week + upload button + recent logs
-- **Client upload screen** — camera/gallery picker, multi-photo upload
-- **Client weekly check-in form** — weight, steps, energy, hunger, wins, struggles
-- **Client history view** — their own timeline, grouped by week
+**Still to build (Phase 3):**
+- Client meal photo upload — camera/gallery picker, up to 5 photos/day, optional note. API already live (`POST /api/meal-logs`).
+- Client weekly check-in form — weight, steps, energy, hunger, wins, struggles. API live (`POST /api/checkins`).
+- Client question posting — async capture, resolves on the coach side. API live (`POST /api/questions`).
+- Client personal timeline — their own 6-week journey grouped by week.
 
-The backend handles all of this already (see `/api/meal-logs`, `/api/checkins`, `/api/questions`). A Phase 2 build would add a separate React component tree for `authState.role === 'client'` that renders the client-facing UI.
+These are all pure frontend additions — extend the `ClientApp` component in `public/index.html`.
 
 ---
 
@@ -172,9 +190,16 @@ All JSON unless noted. Cookie-based session auth — client sends credentials wi
 
 ### Clients (coach only)
 - `GET    /api/clients`
-- `POST   /api/clients`     `{ name, email, pin, start_date, goals? }`
+- `POST   /api/clients`     `{ name, email, pin, start_date, goals? }` → `{ client, email_sent, email_error }`
 - `PATCH  /api/clients/:id` (any subset of fields)
 - `DELETE /api/clients/:id` (cascades logs, checkins, notes, questions, photos)
+- `POST   /api/clients/:id/resend-welcome` → `{ ok, new_pin, email_sent, email_error }` — regenerates PIN, emails new welcome
+
+### Inquiries & leads
+- `POST   /api/inquiries`  *(public, CORS-open, rate-limited 5/hour/IP, honeypot-protected)* — `{ name, email, phone?, message?, website?/* honeypot */, source? }` → `{ ok }`
+- `GET    /api/leads` — coach only
+- `PATCH  /api/leads/:id`  `{ status?, coach_notes?, converted_to_client_id? }` — coach only
+- `DELETE /api/leads/:id` — coach only
 
 ### Meal logs (coach or self-client)
 - `GET  /api/meal-logs?client_id=…`
