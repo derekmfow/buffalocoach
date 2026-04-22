@@ -19,6 +19,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const db = require('./db');
+const { sendEmail } = require('./email');
 
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, 'data', 'uploads');
 const DB_PATH     = process.env.DB_PATH     || path.join(__dirname, 'data', 'app.db');
@@ -66,45 +67,6 @@ function archiveTodayPhotos(dateStr, dstPath) {
   const args = toArchive.map(p => `"${p}"`).join(' ');
   execSync(`tar -czf "${dstPath}" -C "${UPLOAD_ROOT}" ${args}`);
   return dstPath;
-}
-
-/**
- * Send an email via Resend's HTTP API.
- * Minimal implementation — just what we need for file attachments.
- */
-async function sendEmail({ to, from, subject, text, attachmentPath, attachmentName }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) throw new Error('RESEND_API_KEY not set');
-
-  const body = {
-    from,
-    to: [to],
-    subject,
-    text,
-  };
-
-  if (attachmentPath) {
-    const content = fs.readFileSync(attachmentPath);
-    body.attachments = [{
-      filename: attachmentName || path.basename(attachmentPath),
-      content: content.toString('base64'),
-    }];
-  }
-
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Resend API ${res.status}: ${err}`);
-  }
-  return res.json();
 }
 
 /**
