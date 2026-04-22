@@ -2177,7 +2177,7 @@ function WorkoutsView({
   onAddExercise, onUpdateExercise, onDeleteExercise,
   onNewTemplate, onEditTemplate, onDeleteTemplate,
   onNewProgram, onEditProgram, onDeleteProgram,
-  onRunProgram, title, subtitle,
+  onRunProgram, title, subtitle, canEdit,
 }) {
   const [tab, setTab] = useState('programs');
   const [philosophyOpen, setPhilosophyOpen] = useState(false);
@@ -2229,9 +2229,9 @@ function WorkoutsView({
         </div>
       </div>
 
-      {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram} onRun={onRunProgram}/>}
-      {tab==='templates' && <TemplatesList templates={templates} exercises={exercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate}/>}
-      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise}/>}
+      {tab==='programs'  && <ProgramsList programs={programs} templates={templates} onNew={onNewProgram} onEdit={onEditProgram} onDelete={onDeleteProgram} onRun={onRunProgram} canEdit={canEdit}/>}
+      {tab==='templates' && <TemplatesList templates={templates} exercises={exercises} onNew={onNewTemplate} onEdit={onEditTemplate} onDelete={onDeleteTemplate} canEdit={canEdit}/>}
+      {tab==='library'   && <ExerciseLibrary exercises={exercises} onAdd={onAddExercise} onUpdate={onUpdateExercise} onDelete={onDeleteExercise} canEdit={canEdit}/>}
     </div>
   );
 }
@@ -2245,10 +2245,11 @@ const CATEGORY_STYLES = {
   Accessory: 'bg-brand-orange-light text-brand-orange-dark',
 };
 
-function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete }) {
+function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete, canEdit }) {
   const [filter, setFilter]     = useState('All');
   const [modalOpen, setModal]   = useState(false);
   const [editing, setEditing]   = useState(null);
+  const isEditable = (ex) => !canEdit || canEdit(ex);
 
   const filtered = filter==='All' ? exercises : exercises.filter(e => e.muscle_group === filter);
   const grouped = MUSCLE_GROUPS.reduce((acc, mg) => {
@@ -2258,7 +2259,10 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete }) {
   }, {});
 
   const openAdd  = ()  => { setEditing(null); setModal(true); };
-  const openEdit = (ex)=> { setEditing(ex);   setModal(true); };
+  const openEdit = (ex)=> {
+    if (!isEditable(ex)) return;
+    setEditing(ex); setModal(true);
+  };
   const handleSave = (data) => {
     if (editing) onUpdate(editing.id, data);
     else onAdd(data);
@@ -2299,23 +2303,33 @@ function ExerciseLibrary({ exercises, onAdd, onUpdate, onDelete }) {
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {items.map(ex => (
+                {items.map(ex => {
+                  const editable = isEditable(ex);
+                  return (
                   <div key={ex.id} className="bg-white border border-neutral-200 rounded p-4 flex flex-col">
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <h3 className="font-display font-bold text-base leading-tight flex-1">{ex.name}</h3>
-                      <span className={`text-[9px] font-display font-bold tracking-[0.12em] px-2 py-0.5 rounded whitespace-nowrap ${CATEGORY_STYLES[ex.category] || 'bg-neutral-200 text-neutral-700'}`}>
-                        {ex.category.toUpperCase()}
-                      </span>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {canEdit && !editable && (
+                          <span className="text-[9px] font-display font-bold tracking-[0.12em] text-brand-orange bg-brand-orange/10 px-2 py-0.5 rounded whitespace-nowrap">LIBRARY</span>
+                        )}
+                        <span className={`text-[9px] font-display font-bold tracking-[0.12em] px-2 py-0.5 rounded whitespace-nowrap ${CATEGORY_STYLES[ex.category] || 'bg-neutral-200 text-neutral-700'}`}>
+                          {ex.category.toUpperCase()}
+                        </span>
+                      </div>
                     </div>
                     {ex.notes && <p className="text-sm text-neutral-600 leading-relaxed flex-1">{ex.notes}</p>}
-                    <div className="flex justify-end gap-1 mt-3 -mb-1 -mr-1">
-                      <button onClick={()=>openEdit(ex)} title="Edit"
-                        className="text-neutral-400 hover:text-brand-black p-1.5 transition"><Icon.Edit className="w-4 h-4"/></button>
-                      <button onClick={()=>{ if(confirm(`Delete "${ex.name}"?`)) onDelete(ex.id); }} title="Delete"
-                        className="text-neutral-400 hover:text-red-600 p-1.5 transition"><Icon.Trash className="w-4 h-4"/></button>
-                    </div>
+                    {editable && (
+                      <div className="flex justify-end gap-1 mt-3 -mb-1 -mr-1">
+                        <button onClick={()=>openEdit(ex)} title="Edit"
+                          className="text-neutral-400 hover:text-brand-black p-1.5 transition"><Icon.Edit className="w-4 h-4"/></button>
+                        <button onClick={()=>{ if(confirm(`Delete "${ex.name}"?`)) onDelete(ex.id); }} title="Delete"
+                          className="text-neutral-400 hover:text-red-600 p-1.5 transition"><Icon.Trash className="w-4 h-4"/></button>
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -2383,8 +2397,9 @@ function ExerciseModal({ existing, onClose, onSave }) {
 /* =========================================================
    TEMPLATES LIST
    ========================================================= */
-function TemplatesList({ templates, exercises, onNew, onEdit, onDelete }) {
+function TemplatesList({ templates, exercises, onNew, onEdit, onDelete, canEdit }) {
   const exName = (id) => exercises.find(e => e.id === id)?.name || '(removed)';
+  const isEditable = (t) => !canEdit || canEdit(t);
   return (
     <>
       <div className="flex items-center justify-end mb-5">
@@ -2401,35 +2416,51 @@ function TemplatesList({ templates, exercises, onNew, onEdit, onDelete }) {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {templates.map(t => (
-            <div key={t.id} className="bg-white border border-neutral-200 rounded overflow-hidden hover:border-brand-orange transition group">
-              <button onClick={()=>onEdit(t.id)} className="w-full text-left p-5">
-                <div className="flex items-start justify-between gap-3 mb-2">
-                  <h3 className="font-display font-bold text-xl leading-tight group-hover:text-brand-orange transition">{t.name}</h3>
-                  <span className="text-[10px] font-display font-semibold tracking-[0.12em] text-neutral-500 whitespace-nowrap">
-                    {t.exercises.length} {t.exercises.length===1?'MOVEMENT':'MOVEMENTS'}
-                  </span>
+          {templates.map(t => {
+            const editable = isEditable(t);
+            const CardWrap = editable ? 'button' : 'div';
+            const cardWrapProps = editable ? { onClick: ()=>onEdit(t.id), className: 'w-full text-left p-5' } : { className: 'p-5' };
+            return (
+              <div key={t.id} className="bg-white border border-neutral-200 rounded overflow-hidden hover:border-brand-orange transition group">
+                <CardWrap {...cardWrapProps}>
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <h3 className={`font-display font-bold text-xl leading-tight ${editable ? 'group-hover:text-brand-orange' : ''} transition`}>{t.name}</h3>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {canEdit && !editable && (
+                        <span className="text-[9px] font-display font-bold tracking-[0.12em] text-brand-orange bg-brand-orange/10 px-2 py-1 rounded whitespace-nowrap">LIBRARY</span>
+                      )}
+                      <span className="text-[10px] font-display font-semibold tracking-[0.12em] text-neutral-500 whitespace-nowrap">
+                        {t.exercises.length} {t.exercises.length===1?'MOVEMENT':'MOVEMENTS'}
+                      </span>
+                    </div>
+                  </div>
+                  {t.description && <p className="text-sm text-neutral-600 leading-relaxed mb-4">{t.description}</p>}
+                  <ol className="space-y-1.5">
+                    {t.exercises.slice(0, 5).map((ex, i) => (
+                      <li key={i} className="flex items-center gap-3 text-sm">
+                        <span className="w-5 h-5 bg-neutral-100 text-neutral-600 rounded-full flex items-center justify-center font-display font-bold text-[10px] flex-shrink-0">{i+1}</span>
+                        <span className="flex-1 truncate">{exName(ex.exercise_id)}</span>
+                        <span className="text-xs text-neutral-500 whitespace-nowrap">{ex.sets} sets of {ex.reps}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </CardWrap>
+                <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50">
+                  {editable ? (
+                    <>
+                      <button onClick={()=>onEdit(t.id)} className="text-xs font-display font-bold tracking-[0.12em] text-brand-black hover:text-brand-orange transition">
+                        EDIT TEMPLATE →
+                      </button>
+                      <button onClick={()=>{ if(confirm(`Delete template "${t.name}"?`)) onDelete(t.id); }} title="Delete"
+                        className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
+                    </>
+                  ) : (
+                    <span className="text-xs font-display font-semibold tracking-[0.12em] text-neutral-400">VIEW ONLY</span>
+                  )}
                 </div>
-                {t.description && <p className="text-sm text-neutral-600 leading-relaxed mb-4">{t.description}</p>}
-                <ol className="space-y-1.5">
-                  {t.exercises.slice(0, 5).map((ex, i) => (
-                    <li key={i} className="flex items-center gap-3 text-sm">
-                      <span className="w-5 h-5 bg-neutral-100 text-neutral-600 rounded-full flex items-center justify-center font-display font-bold text-[10px] flex-shrink-0">{i+1}</span>
-                      <span className="flex-1 truncate">{exName(ex.exercise_id)}</span>
-                      <span className="text-xs text-neutral-500 whitespace-nowrap">{ex.sets} sets of {ex.reps}</span>
-                    </li>
-                  ))}
-                </ol>
-              </button>
-              <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50">
-                <button onClick={()=>onEdit(t.id)} className="text-xs font-display font-bold tracking-[0.12em] text-brand-black hover:text-brand-orange transition">
-                  EDIT TEMPLATE →
-                </button>
-                <button onClick={()=>{ if(confirm(`Delete template "${t.name}"?`)) onDelete(t.id); }} title="Delete"
-                  className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </>
@@ -2753,8 +2784,9 @@ function TemplateEditor({ template, exercises, onSave, onBack }) {
 /* =========================================================
    PROGRAMS LIST
    ========================================================= */
-function ProgramsList({ programs, templates, onNew, onEdit, onDelete, onRun }) {
+function ProgramsList({ programs, templates, onNew, onEdit, onDelete, onRun, canEdit }) {
   const tplName = (id) => templates.find(t => t.id === id)?.name || '(missing)';
+  const isEditable = (p) => !canEdit || canEdit(p); // coach case (no predicate) = everything editable
   const handleRun = (p) => {
     if (!confirm(`Set "${p.name}" as your active workout? This replaces your current plan.`)) return;
     onRun(p.id);
@@ -2775,51 +2807,68 @@ function ProgramsList({ programs, templates, onNew, onEdit, onDelete, onRun }) {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {programs.map(p => (
-            <div key={p.id} className="bg-white border border-neutral-200 rounded overflow-hidden hover:border-brand-orange transition group">
-              <button onClick={()=>onEdit(p.id)} className="w-full text-left p-5">
-                <div className="flex items-start justify-between gap-3 mb-2">
-                  <h3 className="font-display font-bold text-2xl leading-tight group-hover:text-brand-orange transition">{p.name}</h3>
-                  <span className="text-[10px] font-display font-semibold tracking-[0.12em] text-neutral-500 whitespace-nowrap bg-neutral-100 px-2 py-1 rounded">
-                    {p.days.length} {p.days.length===1?'DAY':'DAYS'}
-                  </span>
-                </div>
-                {p.description && <p className="text-sm text-neutral-600 leading-relaxed mb-4">{p.description}</p>}
-                <ol className="space-y-1.5">
-                  {p.days.map((d, i) => (
-                    <li key={i} className="flex items-center gap-3 text-sm">
-                      <span className="w-5 h-5 bg-brand-black text-white rounded-full flex items-center justify-center font-display font-bold text-[10px] flex-shrink-0">{i+1}</span>
-                      <span className="flex-1 truncate font-display font-semibold">{d.label || tplName(d.template_id)}</span>
-                      {d.label && d.label !== tplName(d.template_id) && (
-                        <span className="text-xs text-neutral-400 truncate">{tplName(d.template_id)}</span>
+          {programs.map(p => {
+            const editable = isEditable(p);
+            // When the card shouldn't open an editor (read-only library item for
+            // a client), render a static div instead of a clickable button so
+            // there's no confusing hover/click affordance.
+            const CardWrap = editable ? 'button' : 'div';
+            const cardWrapProps = editable ? { onClick: ()=>onEdit(p.id), className: 'w-full text-left p-5' } : { className: 'p-5' };
+            return (
+              <div key={p.id} className="bg-white border border-neutral-200 rounded overflow-hidden hover:border-brand-orange transition group">
+                <CardWrap {...cardWrapProps}>
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <h3 className={`font-display font-bold text-2xl leading-tight ${editable ? 'group-hover:text-brand-orange' : ''} transition`}>{p.name}</h3>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {canEdit && !editable && (
+                        <span className="text-[9px] font-display font-bold tracking-[0.12em] text-brand-orange bg-brand-orange/10 px-2 py-1 rounded whitespace-nowrap">LIBRARY</span>
                       )}
-                    </li>
-                  ))}
-                </ol>
-                {p.notes && (
-                  <div className="mt-4 pt-3 border-t border-neutral-100">
-                    <div className="font-display font-bold text-[10px] tracking-[0.12em] text-neutral-500 mb-1">FREQUENCY / NOTES</div>
-                    <p className="text-xs text-neutral-600 leading-relaxed">{p.notes}</p>
+                      <span className="text-[10px] font-display font-semibold tracking-[0.12em] text-neutral-500 whitespace-nowrap bg-neutral-100 px-2 py-1 rounded">
+                        {p.days.length} {p.days.length===1?'DAY':'DAYS'}
+                      </span>
+                    </div>
                   </div>
-                )}
-              </button>
-              <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50 gap-2">
-                <button onClick={()=>onEdit(p.id)} className="text-xs font-display font-bold tracking-[0.12em] text-brand-black hover:text-brand-orange transition">
-                  EDIT PROGRAM →
-                </button>
-                <div className="flex items-center gap-2">
-                  {onRun && (
-                    <button onClick={()=>handleRun(p)}
-                      className="text-xs font-display font-bold tracking-[0.12em] bg-brand-orange text-white hover:bg-brand-orange-dark px-3 py-1.5 rounded transition">
-                      RUN THIS
-                    </button>
+                  {p.description && <p className="text-sm text-neutral-600 leading-relaxed mb-4">{p.description}</p>}
+                  <ol className="space-y-1.5">
+                    {p.days.map((d, i) => (
+                      <li key={i} className="flex items-center gap-3 text-sm">
+                        <span className="w-5 h-5 bg-brand-black text-white rounded-full flex items-center justify-center font-display font-bold text-[10px] flex-shrink-0">{i+1}</span>
+                        <span className="flex-1 truncate font-display font-semibold">{d.label || tplName(d.template_id)}</span>
+                        {d.label && d.label !== tplName(d.template_id) && (
+                          <span className="text-xs text-neutral-400 truncate">{tplName(d.template_id)}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                  {p.notes && (
+                    <div className="mt-4 pt-3 border-t border-neutral-100">
+                      <div className="font-display font-bold text-[10px] tracking-[0.12em] text-neutral-500 mb-1">FREQUENCY / NOTES</div>
+                      <p className="text-xs text-neutral-600 leading-relaxed">{p.notes}</p>
+                    </div>
                   )}
-                  <button onClick={()=>{ if(confirm(`Delete program "${p.name}"?`)) onDelete(p.id); }} title="Delete"
-                    className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
+                </CardWrap>
+                <div className="flex justify-between items-center px-5 py-3 border-t border-neutral-100 bg-neutral-50 gap-2">
+                  {editable ? (
+                    <button onClick={()=>onEdit(p.id)} className="text-xs font-display font-bold tracking-[0.12em] text-brand-black hover:text-brand-orange transition">
+                      EDIT PROGRAM →
+                    </button>
+                  ) : <span/>}
+                  <div className="flex items-center gap-2">
+                    {onRun && (
+                      <button onClick={()=>handleRun(p)}
+                        className="text-xs font-display font-bold tracking-[0.12em] bg-brand-orange text-white hover:bg-brand-orange-dark px-3 py-1.5 rounded transition">
+                        RUN THIS
+                      </button>
+                    )}
+                    {editable && (
+                      <button onClick={()=>{ if(confirm(`Delete program "${p.name}"?`)) onDelete(p.id); }} title="Delete"
+                        className="text-neutral-400 hover:text-red-600 p-1 transition"><Icon.Trash className="w-4 h-4"/></button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </>
@@ -4213,24 +4262,28 @@ function ClientWorkoutsLibrary({
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [selectedProgramId, setSelectedProgramId] = useState(null);
 
-  // Client scope: only their own items — keeps the library view focused on
-  // what they manage. Globals live in the picker on the My Workout editor.
-  const ownExercises = useMemo(() => exercises.filter(e => e.owner_id === client.id), [exercises, client.id]);
-  const ownTemplates = useMemo(() => templates.filter(t => t.owner_id === client.id), [templates, client.id]);
-  const ownPrograms  = useMemo(() => programs.filter(p => p.owner_id === client.id), [programs, client.id]);
+  // The client sees everything they're allowed to see — coach's global library
+  // PLUS their own privates. Ownership determines what they can edit.
+  // API endpoints already return this exact scope for client role.
+  const canEdit = useCallback((item) => item && item.owner_id === client.id, [client.id]);
 
-  // Resolve the currently-selected item, treating '__new__' as a fresh skeleton.
+  // Resolve the currently-selected item (editor mode). Clients can only enter
+  // the editor for items they own — enforced by canEdit guard before opening.
   const selectedTemplate = selectedTemplateId === '__new__'
     ? { id: null, name: '', description: '', exercises: [] }
-    : ownTemplates.find(t => t.id === selectedTemplateId);
+    : templates.find(t => t.id === selectedTemplateId);
 
   const selectedProgram = selectedProgramId === '__new__'
     ? { id: null, name: '', description: '', notes: '', days: [] }
-    : ownPrograms.find(p => p.id === selectedProgramId);
+    : programs.find(p => p.id === selectedProgramId);
 
   // Template editor flow
   const openNewTemplate  = ()  => { setSelectedTemplateId('__new__'); setSubview('template-editor'); };
-  const openEditTemplate = (id)=> { setSelectedTemplateId(id);        setSubview('template-editor'); };
+  const openEditTemplate = (id)=> {
+    const t = templates.find(x => x.id === id);
+    if (!canEdit(t)) return;  // silently ignore; UI already hides the edit button
+    setSelectedTemplateId(id); setSubview('template-editor');
+  };
   const saveTemplate = async (data) => {
     try {
       if (!selectedTemplate?.id) await onCreateTemplate(data);
@@ -4239,10 +4292,19 @@ function ClientWorkoutsLibrary({
     } catch (e) { alert('Save failed: ' + e.message); }
   };
   const backFromTemplateEditor = () => { setSelectedTemplateId(null); setSubview('list'); };
+  const deleteTemplateIfOwned = (id) => {
+    const t = templates.find(x => x.id === id);
+    if (!canEdit(t)) return;
+    onDeleteTemplate(id);
+  };
 
   // Program editor flow
   const openNewProgram  = ()  => { setSelectedProgramId('__new__'); setSubview('program-editor'); };
-  const openEditProgram = (id)=> { setSelectedProgramId(id);        setSubview('program-editor'); };
+  const openEditProgram = (id)=> {
+    const p = programs.find(x => x.id === id);
+    if (!canEdit(p)) return;
+    setSelectedProgramId(id); setSubview('program-editor');
+  };
   const saveProgram = async (data) => {
     try {
       if (!selectedProgram?.id) await onCreateProgram(data);
@@ -4251,15 +4313,31 @@ function ClientWorkoutsLibrary({
     } catch (e) { alert('Save failed: ' + e.message); }
   };
   const backFromProgramEditor = () => { setSelectedProgramId(null); setSubview('list'); };
+  const deleteProgramIfOwned = (id) => {
+    const p = programs.find(x => x.id === id);
+    if (!canEdit(p)) return;
+    onDeleteProgram(id);
+  };
 
-  // RUN THIS handler — surfaces server errors to the user.
+  // Exercise delete (inline modal flow) — same ownership guard.
+  const deleteExerciseIfOwned = (id) => {
+    const e = exercises.find(x => x.id === id);
+    if (!canEdit(e)) return;
+    onDeleteExercise(id);
+  };
+  const updateExerciseIfOwned = (id, patch) => {
+    const e = exercises.find(x => x.id === id);
+    if (!canEdit(e)) return;
+    return onUpdateExercise(id, patch);
+  };
+
+  // RUN THIS handler — works on any visible program (globals or own). Surfaces server errors.
   const runProgram = async (id) => {
     try { await onRunProgram(id); alert('Active plan set. Tap "My Workout" on home to run it.'); }
     catch (e) { alert('Failed: ' + e.message); }
   };
 
   if (subview === 'template-editor' && selectedTemplate) {
-    // TemplateEditor needs ALL exercises (globals + own) so they can pick any.
     return (
       <TemplateEditor
         template={selectedTemplate}
@@ -4270,11 +4348,10 @@ function ClientWorkoutsLibrary({
     );
   }
   if (subview === 'program-editor' && selectedProgram) {
-    // ProgramEditor needs the client's own templates (their library).
     return (
       <ProgramEditor
         program={selectedProgram}
-        templates={ownTemplates}
+        templates={templates}
         onSave={saveProgram}
         onBack={backFromProgramEditor}
       />
@@ -4285,20 +4362,21 @@ function ClientWorkoutsLibrary({
     <div>
       <div className="px-4 sm:px-6 pt-6"><BackLink onClick={onBack}/></div>
       <WorkoutsView
-        exercises={ownExercises}
-        templates={ownTemplates}
-        programs={ownPrograms}
+        exercises={exercises}
+        templates={templates}
+        programs={programs}
+        canEdit={canEdit}
         title="Workouts"
-        subtitle="Your programs, workout days, and exercise library."
+        subtitle="Programs, workout days, and exercises. Your coach's library plus what you build."
         onAddExercise={onCreateExercise}
-        onUpdateExercise={onUpdateExercise}
-        onDeleteExercise={onDeleteExercise}
+        onUpdateExercise={updateExerciseIfOwned}
+        onDeleteExercise={deleteExerciseIfOwned}
         onNewTemplate={openNewTemplate}
         onEditTemplate={openEditTemplate}
-        onDeleteTemplate={onDeleteTemplate}
+        onDeleteTemplate={deleteTemplateIfOwned}
         onNewProgram={openNewProgram}
         onEditProgram={openEditProgram}
-        onDeleteProgram={onDeleteProgram}
+        onDeleteProgram={deleteProgramIfOwned}
         onRunProgram={runProgram}
       />
     </div>
