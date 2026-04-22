@@ -441,6 +441,15 @@ app.post('/api/checkins', requireAnyAuth, (req, res) => {
   const { week_number, weight_lbs, steps_avg, energy_1_10, hunger_1_10, wins, struggles } = req.body;
   if (!clientId || week_number === undefined) return res.status(400).json({ error: 'client_id and week_number required' });
 
+  // If the existing row is locked and this is a client trying to edit, refuse.
+  // Coach can always overwrite — useful for fixing data even after locking.
+  if (req.session.role === 'client') {
+    const existing = db.prepare('SELECT is_locked FROM weekly_checkins WHERE client_id = ? AND week_number = ?').get(clientId, week_number);
+    if (existing && existing.is_locked) {
+      return res.status(403).json({ error: 'this check-in is locked — text your coach if you need to update it' });
+    }
+  }
+
   const id = uid('ci');
   db.prepare(
     `INSERT INTO weekly_checkins (id, client_id, week_number, weight_lbs, steps_avg, energy_1_10, hunger_1_10, wins, struggles, created_at)
@@ -457,6 +466,16 @@ app.post('/api/checkins', requireAnyAuth, (req, res) => {
 
   const row = db.prepare('SELECT * FROM weekly_checkins WHERE client_id = ? AND week_number = ?').get(clientId, week_number);
   res.json(row);
+});
+
+// Coach-only: toggle the lock flag on a submitted check-in.
+// When locked, the client can no longer edit it; coach can still overwrite.
+app.patch('/api/checkins/:id/lock', requireCoach, (req, res) => {
+  const { is_locked } = req.body;
+  const existing = db.prepare('SELECT * FROM weekly_checkins WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE weekly_checkins SET is_locked = ? WHERE id = ?').run(is_locked ? 1 : 0, req.params.id);
+  res.json(db.prepare('SELECT * FROM weekly_checkins WHERE id = ?').get(req.params.id));
 });
 
 // ============================================================
