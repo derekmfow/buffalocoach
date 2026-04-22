@@ -610,20 +610,52 @@ app.delete('/api/exercises/:id', requireAnyAuth, (req, res) => {
 });
 
 // ============================================================
-// TEMPLATES + PROGRAMS (coach-only writes, both can read)
+// TEMPLATES + PROGRAMS
+//
+// owner_id NULL = global (coach's library). client_id = private to that client.
+//
+// Reads:
+//   Coach, no filter → globals only (their library)
+//   Coach, ?client_id=X → globals + that client's private (for picker)
+//   Client, no filter → globals + own private (for picker + library UI)
+// Writes:
+//   Coach creating → global (owner_id NULL)
+//   Client creating → private (owner_id = their client_id)
+//   Coach can edit/delete anything; client can edit/delete only own private.
 // ============================================================
 app.get('/api/templates', requireAnyAuth, (req, res) => {
-  res.json(parseJSONRows(db.prepare('SELECT * FROM templates ORDER BY name').all(), 'exercises'));
+  if (req.session.role === 'coach') {
+    if (req.query.client_id) {
+      const rows = db.prepare(
+        'SELECT * FROM templates WHERE owner_id IS NULL OR owner_id = ? ORDER BY name'
+      ).all(req.query.client_id);
+      return res.json(parseJSONRows(rows, 'exercises'));
+    }
+    const rows = db.prepare('SELECT * FROM templates WHERE owner_id IS NULL ORDER BY name').all();
+    return res.json(parseJSONRows(rows, 'exercises'));
+  }
+  const rows = db.prepare(
+    'SELECT * FROM templates WHERE owner_id IS NULL OR owner_id = ? ORDER BY name'
+  ).all(req.session.client_id);
+  res.json(parseJSONRows(rows, 'exercises'));
 });
-app.post('/api/templates', requireCoach, (req, res) => {
+
+app.post('/api/templates', requireAnyAuth, (req, res) => {
   const { name, description, exercises } = req.body;
   if (!name || !Array.isArray(exercises)) return res.status(400).json({ error: 'name and exercises[] required' });
+  const ownerId = req.session.role === 'client' ? req.session.client_id : null;
   const id = uid('t');
-  db.prepare('INSERT INTO templates (id, name, description, exercises, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(id, name.trim(), (description || '').trim(), JSON.stringify(exercises), today());
+  db.prepare('INSERT INTO templates (id, name, description, exercises, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, name.trim(), (description || '').trim(), JSON.stringify(exercises), ownerId, today());
   res.json(parseJSONField(db.prepare('SELECT * FROM templates WHERE id = ?').get(id), 'exercises'));
 });
-app.patch('/api/templates/:id', requireCoach, (req, res) => {
+
+app.patch('/api/templates/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   const { name, description, exercises } = req.body;
   const fields = [], values = [];
   if (name        !== undefined) { fields.push('name = ?');        values.push(name.trim()); }
@@ -634,23 +666,50 @@ app.patch('/api/templates/:id', requireCoach, (req, res) => {
   db.prepare(`UPDATE templates SET ${fields.join(', ')} WHERE id = ?`).run(...values);
   res.json(parseJSONField(db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id), 'exercises'));
 });
-app.delete('/api/templates/:id', requireCoach, (req, res) => {
+
+app.delete('/api/templates/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
 app.get('/api/programs', requireAnyAuth, (req, res) => {
-  res.json(parseJSONRows(db.prepare('SELECT * FROM programs ORDER BY name').all(), 'days'));
+  if (req.session.role === 'coach') {
+    if (req.query.client_id) {
+      const rows = db.prepare(
+        'SELECT * FROM programs WHERE owner_id IS NULL OR owner_id = ? ORDER BY name'
+      ).all(req.query.client_id);
+      return res.json(parseJSONRows(rows, 'days'));
+    }
+    const rows = db.prepare('SELECT * FROM programs WHERE owner_id IS NULL ORDER BY name').all();
+    return res.json(parseJSONRows(rows, 'days'));
+  }
+  const rows = db.prepare(
+    'SELECT * FROM programs WHERE owner_id IS NULL OR owner_id = ? ORDER BY name'
+  ).all(req.session.client_id);
+  res.json(parseJSONRows(rows, 'days'));
 });
-app.post('/api/programs', requireCoach, (req, res) => {
+
+app.post('/api/programs', requireAnyAuth, (req, res) => {
   const { name, description, notes, days } = req.body;
   if (!name || !Array.isArray(days)) return res.status(400).json({ error: 'name and days[] required' });
+  const ownerId = req.session.role === 'client' ? req.session.client_id : null;
   const id = uid('p');
-  db.prepare('INSERT INTO programs (id, name, description, notes, days, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, name.trim(), (description || '').trim(), (notes || '').trim(), JSON.stringify(days), today());
+  db.prepare('INSERT INTO programs (id, name, description, notes, days, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name.trim(), (description || '').trim(), (notes || '').trim(), JSON.stringify(days), ownerId, today());
   res.json(parseJSONField(db.prepare('SELECT * FROM programs WHERE id = ?').get(id), 'days'));
 });
-app.patch('/api/programs/:id', requireCoach, (req, res) => {
+
+app.patch('/api/programs/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM programs WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   const { name, description, notes, days } = req.body;
   const fields = [], values = [];
   if (name        !== undefined) { fields.push('name = ?');        values.push(name.trim()); }
@@ -662,7 +721,13 @@ app.patch('/api/programs/:id', requireCoach, (req, res) => {
   db.prepare(`UPDATE programs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
   res.json(parseJSONField(db.prepare('SELECT * FROM programs WHERE id = ?').get(req.params.id), 'days'));
 });
-app.delete('/api/programs/:id', requireCoach, (req, res) => {
+
+app.delete('/api/programs/:id', requireAnyAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM programs WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (req.session.role === 'client' && existing.owner_id !== req.session.client_id) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   db.prepare('DELETE FROM programs WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
@@ -736,9 +801,13 @@ app.post('/api/client-programs', requireAnyAuth, (req, res) => {
   const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(clientId);
   if (!client) return res.status(404).json({ error: 'client not found' });
 
-  // Clients can only create blank plans (their own). Coach can use library.
+  // Clients can only use programs they own as a base. Coach globals need to be assigned by the coach.
   if (req.session.role === 'client' && base_program_id) {
-    return res.status(403).json({ error: 'clients cannot import library programs — build blank or ask coach to assign' });
+    const baseProgram = db.prepare('SELECT owner_id FROM programs WHERE id = ?').get(base_program_id);
+    if (!baseProgram) return res.status(404).json({ error: 'base program not found' });
+    if (baseProgram.owner_id !== req.session.client_id) {
+      return res.status(403).json({ error: 'clients can only run their own programs — ask coach to assign a library program' });
+    }
   }
 
   let days, planName, planDescription, planNotes;
