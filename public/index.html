@@ -411,7 +411,8 @@ function DashboardHeader({ onLogout, currentSection, onNavigate, newLeadsCount =
             }`}>
             {backupLabel}
           </button>
-          <a href="#ham-app" onClick={(e)=>e.preventDefault()} title="Open Hormone Aligned Nutrition (free app)"
+          <a href="https://hormonealignednutrition.onrender.com" target="_blank" rel="noopener noreferrer"
+             title="Open Hormone Aligned Nutrition (free app)"
              className="text-neutral-400 hover:text-white text-xs font-display font-semibold tracking-[0.12em] transition hidden md:flex items-center gap-1.5">
             <span>HAM APP</span>
             <Icon.Ext className="w-3 h-3"/>
@@ -4052,11 +4053,28 @@ function ClientHome({ client, firstName, week, mealLogs, checkins, clientProgram
       </div>
 
       <button onClick={()=>onGo('timeline')}
-        className="w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 mb-6 text-left transition active:scale-[0.99]">
+        className="w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 mb-3 text-left transition active:scale-[0.99]">
         <div className="font-display font-bold tracking-[0.15em] text-[10px] text-neutral-500 mb-1">HISTORY</div>
         <div className="font-display font-bold text-xl leading-tight mb-1">Your 6-Week Timeline</div>
         <div className="text-neutral-600 text-sm">Uploads, check-ins, and feedback from Derek</div>
       </button>
+
+      {/* HAM APP — external link to the free macros/meal tool. Opens in a new
+          tab so the client doesn't lose their place in the coaching portal.
+          The external-link icon tells them they're leaving the app. */}
+      <a href="https://hormonealignednutrition.onrender.com" target="_blank" rel="noopener noreferrer"
+        className="block w-full bg-white border border-neutral-200 hover:border-brand-orange rounded-lg p-4 mb-6 text-left transition active:scale-[0.99] no-underline text-inherit">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-display font-bold tracking-[0.15em] text-[10px] text-brand-orange mb-1">MACROS</div>
+            <div className="font-display font-bold text-xl leading-tight mb-1">Hormone Aligned Macros</div>
+            <div className="text-neutral-600 text-sm">Calculate targets, analyze meals, find swaps</div>
+          </div>
+          <div className="text-neutral-400 mt-1 flex-shrink-0">
+            <Icon.Ext className="w-4 h-4"/>
+          </div>
+        </div>
+      </a>
 
       {client.goals && (
         <div className="bg-white border border-neutral-200 rounded p-5 mb-6">
